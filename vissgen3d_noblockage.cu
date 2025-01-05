@@ -169,6 +169,7 @@ __global__ void computeC(int npix, float* dcf, float* dg, int* gs,
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < npix) {
         // uvw_index 维度和 uvw，dg, Viss, C相等
+        C[idx] = Viss[0]*Complex(dcf[0], 0);
         for (int i = 0; i < uvw_index; i++) {
             float dcf2 = dcf[gs[i]] * dg[i];
             if (dcf2 > (1.0f / 8.0f)) {
@@ -194,7 +195,7 @@ int vissGen(float frequency)
 
     cout << "frequency: " << frequency << endl;
 
-    int days = 450;
+    int days = 1;
     Complex I1(0.0, 1.0);
     Complex zero(0.0, 0.0);
     Complex one(1.0, 0.0);
