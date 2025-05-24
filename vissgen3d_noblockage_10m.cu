@@ -46,7 +46,7 @@ __device__ float norm(float x, float y, float z) {
 struct timeval start, finish;
 float total_time;
 
-string address = "./earth_10Mhz/";
+string address = "/data/zhaoxiang/earth_10Mhz/";
 
 
 __global__ void healpix_moonback_pre(float *theta_heal, float *phi_heal,
@@ -187,22 +187,24 @@ int vissGen(float frequency)
 {   
     gettimeofday(&start, NULL);
 
-    int nDevices = 1;
+    int nDevices;
     // 设置节点数量（gpu显卡数量）
-    // CHECK(cudaGetDeviceCount(&nDevices));
+    CHECK(cudaGetDeviceCount(&nDevices));
     // 设置并行区中的线程数
     omp_set_num_threads(nDevices);
     cout << "devices: " << nDevices << endl;
 
     cout << "frequency: " << frequency << endl;
 
-    int days = 1;
+    int days = 4;
+    int start_day = 1;
     Complex I1(0.0, 1.0);
     Complex zero(0.0, 0.0);
     Complex one(1.0, 0.0);
     Complex two(2.0, 0.0);
     Complex CPI(M_PI, 0.0);
     cout << "days: " << days << endl;
+    cout << "start day: " << start_day << endl;
 
     // 读取 B.txt, theta_heal.txt, phi_heal.txt 文件
     string address_B = address + "B_10Mhz.txt";
@@ -267,7 +269,7 @@ int vissGen(float frequency)
         std::cout << "Thread " << tid << " is running on device " << tid << endl;
 
         // 遍历所有开启的线程处理， 一个线程控制一个GPU 处理一个id*amount/total的块
-        for (int p = tid; p < days; p += nDevices) {
+        for (int p = tid + start_day; p < days; p += nDevices) {
             cout << "for loop: " << p+1 << endl;
 
             // 将 B, theta_heal, phi_heal 数据从CPU搬到GPU上        

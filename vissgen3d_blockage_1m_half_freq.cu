@@ -25,7 +25,7 @@
 
 using namespace std;
 using Complex = thrust::complex<float>;
-const int uvw_presize = 4000000;
+const int uvw_presize = 400000;
 
 
 // complexExp 函数的实现
@@ -164,8 +164,9 @@ __global__ void viss_gamma_trans(Complex* Viss, float* w, float* bll, float* gam
 }
 
 
-__global__ void computeC(int npix, float* dcf, float* dg, int* gs, 
-                        float* u, float* v, float* w,
+__global__ void computeC(int npix, 
+                        // float* dcf, float* dg, int* gs, 
+                        float* u, float* v, float* w, float* f,
                         float *xyz1a, float *xyz1b, float *xyz1c, 
                         float *xyz2a, float *xyz2b, float *xyz2c,
                         float* l, float* m, float* n, 
@@ -175,18 +176,21 @@ __global__ void computeC(int npix, float* dcf, float* dg, int* gs,
     if (index < npix) {
         // uvw_index 维度和 uvw，dg, Viss, C相等
         for (int i = 0; i < uvw_index; i++) {
-            float dcf2 = dcf[gs[i]] * dg[i];
+            // float dcf2 = dcf[gs[i]] * dg[i];
+            float penalty = f[i];
 
             float b1_comp = l[index]*xyz1a[i] + m[index]*xyz1b[i] + n[index]*xyz1c[i];
             float b2_comp = l[index]*xyz2a[i] + m[index]*xyz2b[i] + n[index]*xyz2c[i];
             float beta1 = acosf(b1_comp / norm(xyz1a[i], xyz1b[i], xyz1c[i]));
             float beta2 = acosf(b2_comp / norm(xyz2a[i], xyz2b[i], xyz2c[i]));
             if (beta1>phi || beta2>phi){
-                dcf2 = 0;
+                // dcf2 = 0;
+                penalty = 0.0f;
             }
-            dcf2 = min(dcf2, 1.0f/8.0f);
+            // dcf2 = min(dcf2, 1.0f/8.0f);
             Complex PhaseDifference(u[i] * l[index] + v[i] * m[index] + w[i] * n[index], 0.0f);
-            C[index] += Viss[i] * Complex(dcf2, 0.0f) * complexExp(two * CPI * I1 * PhaseDifference);
+            // C[index] += Viss[i] * Complex(dcf2, 0.0f) * complexExp(two * CPI * I1 * PhaseDifference);
+            C[index] += Viss[i] * Complex(penalty, 0.0f) * complexExp(two * CPI * I1 * PhaseDifference);
         }
     }
 }
@@ -205,7 +209,7 @@ int vissGen(float frequency)
 
     cout << "frequency: " << frequency << endl;
 
-    int days = 450;
+    int days = 2;
     Complex I1(0.0, 1.0);
     Complex zero(0.0, 0.0);
     Complex one(1.0, 0.0);
@@ -288,8 +292,8 @@ int vissGen(float frequency)
             // 创建临时变量
             thrust::device_vector<float> l(npix), m(npix), n(npix);
 
-            std::vector<float> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize);
-            thrust::device_vector<float> u(uvw_presize), v(uvw_presize), w(uvw_presize);
+            std::vector<float> cu(uvw_presize), cv(uvw_presize), cw(uvw_presize), cf(uvw_presize);
+            thrust::device_vector<float> u(uvw_presize), v(uvw_presize), w(uvw_presize), f(uvw_presize);
 
             std::vector<float> cxyz1a(uvw_presize), cxyz1b(uvw_presize), cxyz1c(uvw_presize);
             thrust::device_vector<float> xyz1a(uvw_presize), xyz1b(uvw_presize), xyz1c(uvw_presize);
@@ -305,22 +309,28 @@ int vissGen(float frequency)
             // 存储计算后的到的最终结果
             thrust::device_vector<Complex> C(npix); 
 
+            cudaEvent_t compute_start, compute_stop;
+            cudaEventCreate(&compute_start);
+            cudaEventCreate(&compute_stop);
+            cudaEventRecord(compute_start);
+
             int uvw_index, xyz1_index, xyz2_index, bll_index; 
             #pragma omp critical
             {   
                 // 读取 uvw
-                string address_uvw = address + "uvw" + to_string(p+1) + "day1M.txt";
+                string address_uvw = address + "updated_uvw" + to_string(p+1) + "day1M.txt";
                 cout << "address_uvw: " << address_uvw << endl;
                 ifstream uvwFile(address_uvw);
                 uvw_index = 0;
-                float u_point, v_point, w_point;
+                float u_point, v_point, w_point, f_point;
                 if (uvwFile.is_open()) {
-                    uvwFile >> u_point >> v_point >> w_point; // 读取第一行，删除
-                    while (uvwFile >> u_point >> v_point >> w_point) {
+                    uvwFile >> u_point >> v_point >> w_point >> f_point; // 读取第一行，删除
+                    while (uvwFile >> u_point >> v_point >> w_point >> f_point) {
                         // cu, cv, cw 需要存储原始坐标
                         cu[uvw_index] = u_point;
                         cv[uvw_index] = v_point;
                         cw[uvw_index] = w_point;
+                        cf[uvw_index] = 1 / f_point;
                         uvw_index++;
                     }
                 }
@@ -329,7 +339,8 @@ int vissGen(float frequency)
                 thrust::copy(cu.begin(), cu.begin() + uvw_index, u.begin());
                 thrust::copy(cv.begin(), cv.begin() + uvw_index, v.begin());
                 thrust::copy(cw.begin(), cw.begin() + uvw_index, w.begin());
-                
+                thrust::copy(cf.begin(), cf.begin() + uvw_index, f.begin());
+
                 // 读取 xyz1(xyza)
                 string address_xyz1 = address + "xyza" + to_string(p+1) + "day1M.txt";
                 cout << "address_xyz1: " << address_xyz1 << endl;
@@ -466,24 +477,24 @@ int vissGen(float frequency)
             cout << "Period " << p+1 << " countOccurrences..." << endl;
 
 
-            thrust::device_vector<float> dcfR(nr);
-            // R=[1:nr]';   R=R/2+1/4;
-            calculateR<<<(nr + 255) / 256, 256>>>(thrust::raw_pointer_cast(dcfR.data()), nr);
-            CHECK(cudaDeviceSynchronize());
-            cout << "Period " << p+1 << " calculateR..." << endl;
+            // thrust::device_vector<float> dcfR(nr);
+            // // R=[1:nr]';   R=R/2+1/4;
+            // calculateR<<<(nr + 255) / 256, 256>>>(thrust::raw_pointer_cast(dcfR.data()), nr);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Period " << p+1 << " calculateR..." << endl;
 
 
-            thrust::device_vector<float> dcf(nr+1);
-            // dcf=2/3*pi*(R.^3-(R-1/2).^3)./mb;    dcf=[1/pi/4;dcf];
-            cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, calculateDcf, 0, 0);
-            gridSize = floor((nr+1) + blockSize - 1) / blockSize;
-            calculateDcf<<<gridSize, blockSize>>>(
-                thrust::raw_pointer_cast(dcf.data()), 
-                thrust::raw_pointer_cast(dcfR.data()), 
-                thrust::raw_pointer_cast(mb.data()), 
-                nr+1);
-            CHECK(cudaDeviceSynchronize());
-            cout << "Period " << p+1 << " calculateDcf..." << endl;
+            // thrust::device_vector<float> dcf(nr+1);
+            // // dcf=2/3*pi*(R.^3-(R-1/2).^3)./mb;    dcf=[1/pi/4;dcf];
+            // cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, calculateDcf, 0, 0);
+            // gridSize = floor((nr+1) + blockSize - 1) / blockSize;
+            // calculateDcf<<<gridSize, blockSize>>>(
+            //     thrust::raw_pointer_cast(dcf.data()), 
+            //     thrust::raw_pointer_cast(dcfR.data()), 
+            //     thrust::raw_pointer_cast(mb.data()), 
+            //     nr+1);
+            // CHECK(cudaDeviceSynchronize());
+            // cout << "Period " << p+1 << " calculateDcf..." << endl;
 
 
             thrust::device_vector<float> gamma(uvw_index);
@@ -506,12 +517,13 @@ int vissGen(float frequency)
             gridSize = floor(npix + blockSize - 1) / blockSize;
             computeC<<<gridSize, blockSize>>>(
                 npix, 
-                thrust::raw_pointer_cast(dcf.data()), 
-                thrust::raw_pointer_cast(dg.data()), 
-                thrust::raw_pointer_cast(gs.data()), 
+                // thrust::raw_pointer_cast(dcf.data()), 
+                // thrust::raw_pointer_cast(dg.data()), 
+                // thrust::raw_pointer_cast(gs.data()), 
                 thrust::raw_pointer_cast(u.data()),
                 thrust::raw_pointer_cast(v.data()),
                 thrust::raw_pointer_cast(w.data()),
+                thrust::raw_pointer_cast(f.data()),
                 thrust::raw_pointer_cast(xyz1a.data()),
                 thrust::raw_pointer_cast(xyz1b.data()),
                 thrust::raw_pointer_cast(xyz1c.data()),
@@ -526,6 +538,16 @@ int vissGen(float frequency)
                 I1, two, CPI, phi, uvw_index);
             CHECK(cudaDeviceSynchronize());
             cout << "Period " << p+1 << " compute C success" << endl;
+            
+            cudaEventRecord(compute_stop);
+            cudaEventSynchronize(compute_stop);
+            // 计算经过的时间
+            float computeMS = 0;
+            cudaEventElapsedTime(&computeMS, compute_start, compute_stop);
+            printf("Period %d Compute Cost Time is: %f s\n", p+1, computeMS/1000);
+            // 销毁事件
+            cudaEventDestroy(compute_start);
+            cudaEventDestroy(compute_stop);
 
             for (int i=0; i<=2; i++){
                 cout << "C[" << i << "]: " << C[i] << endl;
