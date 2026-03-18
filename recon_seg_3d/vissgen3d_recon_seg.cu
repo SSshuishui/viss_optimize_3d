@@ -93,6 +93,30 @@ static bool load_single_noheader(const std::string& path, float* out, long long 
 }
 
 // updated_uvw / xyz：第一行表头，后面每行若干列 float
+
+
+static bool load_single_skip_first(
+    const std::string& path,
+    float* a,
+    int maxN,
+    int& outN
+) {
+  FILE* fp = fopen(path.c_str(), "r");
+  if (!fp) return false;
+  char line[256];
+  if (!fgets(line, sizeof(line), fp)) { fclose(fp); return false; }
+
+  int n = 0;
+  while (n < maxN && fgets(line, sizeof(line), fp)) {
+    char* p = line;
+    a[n] = strtof(p, &p);
+    n++;
+  }
+  fclose(fp);
+  outN = n;
+  return true;
+}
+
 static bool load_quad_skip_first(
     const std::string& path,
     float* a, float* b, float* c, float* d,
@@ -173,6 +197,84 @@ __global__ void healpix_lmn_from_theta_phi_chunk(
   n[idx] = st;
 }
 
+
+
+__global__ void ceilAndScale_opt(
+    const float* __restrict__ bll,
+    int* __restrict__ gs,
+    int size,
+    int nr
+) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= size) return;
+
+  float x = (bll[idx] - 0.25f) * 2.0f;
+  int g = __float2int_ru(x);
+  if (g < 0) g = 0;
+  if (g > nr) g = nr;
+  gs[idx] = g;
+}
+
+__global__ void phase_correct_and_dg(
+    float2* __restrict__ Viss,
+    const float* __restrict__ w,
+    const float* __restrict__ bll,
+    float* __restrict__ dg,
+    int uvw_index
+) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= uvw_index) return;
+
+  float wv = w[idx];
+  float bv = bll[idx];
+
+  float ang = -2.0f * (float)M_PI * wv;
+  float s, c;
+  sincos_fast(ang, &s, &c);
+
+  float a = Viss[idx].x;
+  float b = Viss[idx].y;
+
+  float re = a * c - b * s;
+  float im = a * s + b * c;
+  Viss[idx] = make_float2(re, im);
+
+  float ratio = (bv != 0.0f) ? (wv / bv) : 0.0f;
+  ratio = fminf(1.0f, fmaxf(-1.0f, ratio));
+
+  float gamma = asinf(ratio);
+  float sg = sinf(gamma);
+  float cg = cosf(gamma);
+
+  float inside = 1.0f - 4.0f * sg * sg;
+  float mag = sqrtf(fabsf(inside));
+
+  float denom = fabsf(cg);
+  if (denom < 1e-12f) denom = 1e-12f;
+
+  dg[idx] = mag / denom * 1.5f;
+}
+
+__global__ void precompute_weight(
+    float* __restrict__ weight,
+    const float* __restrict__ dcf,
+    const float* __restrict__ dg,
+    const int* __restrict__ gs,
+    int uvw_index,
+    int nr
+) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= uvw_index) return;
+
+  int g = gs[idx];
+  if (g < 0) g = 0;
+  if (g > nr) g = nr;
+
+  float val = dcf[g] * dg[idx];
+  if (val > (1.0f / 8.0f)) val = (1.0f / 8.0f);
+  weight[idx] = val;
+}
+
 // Viss partial (per GPU chunk), then host reduce
 template<int TILE_PIX>
 __global__ void viss_partial(
@@ -189,7 +291,6 @@ __global__ void viss_partial(
     const float* __restrict__ xyz1a, const float* __restrict__ xyz1b, const float* __restrict__ xyz1c,
     const float* __restrict__ xyz2a, const float* __restrict__ xyz2b, const float* __restrict__ xyz2c,
     float phi,
-    int use_blockage,
 
     int amount,
     float2* __restrict__ Vpart
@@ -201,18 +302,11 @@ __global__ void viss_partial(
   float v0 = v[i];
   float w0 = w[i];
 
-  float x1a0=0.0f, x1b0=0.0f, x1c0=0.0f;
-  float x2a0=0.0f, x2b0=0.0f, x2c0=0.0f;
-  float thr1 = 0.0f, thr2 = 0.0f;
-  if (use_blockage) {
-    x1a0=xyz1a[i]; x1b0=xyz1b[i]; x1c0=xyz1c[i];
-    x2a0=xyz2a[i]; x2b0=xyz2b[i]; x2c0=xyz2c[i];
-    float n1 = norm3(x1a0,x1b0,x1c0);
-    float n2 = norm3(x2a0,x2b0,x2c0);
-    float cosphi = use_blockage ? cosf(phi) : 0.0f;
-    thr1 = n1 * cosphi;
-    thr2 = n2 * cosphi;
-  }
+  float x1a0=xyz1a[i], x1b0=xyz1b[i], x1c0=xyz1c[i];
+  float x2a0=xyz2a[i], x2b0=xyz2b[i], x2c0=xyz2c[i];
+  float cosphi = cosf(phi);
+  float thr1 = norm3(x1a0,x1b0,x1c0) * cosphi;
+  float thr2 = norm3(x2a0,x2b0,x2c0) * cosphi;
 
   float acc_re = 0.0f;
   float acc_im = 0.0f;
@@ -255,11 +349,9 @@ __global__ void viss_partial(
     #pragma unroll 4
     for (int t=0;t<tileN;t++) {
       float lp=sL[t], mp=sM[t], npv=sN[t];
-      if (use_blockage) {
-        float dot1 = lp*x1a0 + mp*x1b0 + npv*x1c0;
-        float dot2 = lp*x2a0 + mp*x2b0 + npv*x2c0;
-        if (dot1 < thr1 || dot2 < thr2) continue;
-      }
+      float dot1 = lp*x1a0 + mp*x1b0 + npv*x1c0;
+      float dot2 = lp*x2a0 + mp*x2b0 + npv*x2c0;
+      if (dot1 < thr1 || dot2 < thr2) continue;
 
       float phase = u0*lp + v0*mp + w0*(npv - 1.0f);
       float ang = k * phase;
@@ -276,27 +368,7 @@ __global__ void viss_partial(
   Vpart[i] = make_float2(acc_re, acc_im);
 }
 
-__global__ void phase_correct_viss(
-    float2* __restrict__ Viss,
-    const float* __restrict__ w,
-    int uvw_index
-) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= uvw_index) return;
-
-  float ang = -2.0f * (float)M_PI * w[idx];
-  float s, c;
-  sincos_fast(ang, &s, &c);
-
-  float a = Viss[idx].x;
-  float b = Viss[idx].y;
-
-  float re = a * c - b * s;
-  float im = a * s + b * c;
-  Viss[idx] = make_float2(re, im);
-}
-
-// compute C real (per GPU chunk), uvw tiling, with FOV + penalty f
+// compute C real (per GPU chunk), uvw tiling, with MATLAB weight + optional recon blockage
 template<int TILE_UVW>
 __global__ void computeC_real_chunk(
     long long n_chunk,
@@ -307,8 +379,8 @@ __global__ void computeC_real_chunk(
     const float* __restrict__ u,
     const float* __restrict__ v,
     const float* __restrict__ w,
+    const float* __restrict__ weight,
 
-    const float* __restrict__ f,
     const float* __restrict__ xyz1a, const float* __restrict__ xyz1b, const float* __restrict__ xyz1c,
     const float* __restrict__ xyz2a, const float* __restrict__ xyz2b, const float* __restrict__ xyz2c,
     float phi,
@@ -335,9 +407,9 @@ __global__ void computeC_real_chunk(
   float* su = (float*)smem_raw;
   float* sv = su + TILE_UVW;
   float* sw = sv + TILE_UVW;
-  float* sf = sw + TILE_UVW;
+  float* sweight = sw + TILE_UVW;
 
-  float* sx1a = sf + TILE_UVW;
+  float* sx1a = sweight + TILE_UVW;
   float* sx1b = sx1a + TILE_UVW;
   float* sx1c = sx1b + TILE_UVW;
 
@@ -358,7 +430,7 @@ __global__ void computeC_real_chunk(
         su[threadIdx.x] = u[i];
         sv[threadIdx.x] = v[i];
         sw[threadIdx.x] = w[i];
-        sf[threadIdx.x] = f[i];
+        sweight[threadIdx.x] = weight[i];
 
         float x1a0=xyz1a[i], x1b0=xyz1b[i], x1c0=xyz1c[i];
         float x2a0=xyz2a[i], x2b0=xyz2b[i], x2c0=xyz2c[i];
@@ -369,7 +441,7 @@ __global__ void computeC_real_chunk(
 
         sV[threadIdx.x] = Viss[i];
       } else {
-        su[threadIdx.x]=0.0f; sv[threadIdx.x]=0.0f; sw[threadIdx.x]=0.0f; sf[threadIdx.x]=0.0f;
+        su[threadIdx.x]=0.0f; sv[threadIdx.x]=0.0f; sw[threadIdx.x]=0.0f; sweight[threadIdx.x]=0.0f;
         sx1a[threadIdx.x]=0.0f; sx1b[threadIdx.x]=0.0f; sx1c[threadIdx.x]=0.0f;
         sx2a[threadIdx.x]=0.0f; sx2b[threadIdx.x]=0.0f; sx2c[threadIdx.x]=0.0f;
         sInv1[threadIdx.x]=0.0f; sInv2[threadIdx.x]=0.0f;
@@ -381,14 +453,15 @@ __global__ void computeC_real_chunk(
     int tileN = min(TILE_UVW, uvw_index - base);
     #pragma unroll 4
     for (int t=0;t<tileN;t++) {
-      float pen = use_blockage ? sf[t] : 1.0f;
+      float wt = sweight[t];
+      if (wt == 0.0f) continue;
+
       if (use_blockage) {
         float dot1 = lp*sx1a[t] + mp*sx1b[t] + npv*sx1c[t];
         float dot2 = lp*sx2a[t] + mp*sx2b[t] + npv*sx2c[t];
         float c1 = dot1 * sInv1[t];
         float c2 = dot2 * sInv2[t];
         if (!(c1 >= cosphi && c2 >= cosphi)) continue;
-        if (pen == 0.0f) continue;
       }
 
       float phase = su[t]*lp + sv[t]*mp + sw[t]*npv;
@@ -399,8 +472,8 @@ __global__ void computeC_real_chunk(
       float a = sV[t].x;
       float b = sV[t].y;
 
-      acc_re += pen * (a * c - b * s);
-      acc_im += pen * (a * s + b * c);
+      acc_re += wt * (a * c - b * s);
+      acc_im += wt * (a * s + b * c);
     }
     __syncthreads();
   }
@@ -425,7 +498,12 @@ struct GpuCtx {
 
   int UVW_MAX = 450000;
   float* d_u=nullptr; float* d_v=nullptr; float* d_w=nullptr;
-  float* d_f=nullptr;
+  float* d_bll=nullptr;
+  int*   d_gs=nullptr;
+  float* d_dg=nullptr;
+  float* d_weight=nullptr;
+  float* d_dcf=nullptr;
+
   float* d_xyz1a=nullptr; float* d_xyz1b=nullptr; float* d_xyz1c=nullptr;
   float* d_xyz2a=nullptr; float* d_xyz2b=nullptr; float* d_xyz2c=nullptr;
 
@@ -442,6 +520,8 @@ int main(int argc, char** argv) {
   int nside = to_int(get_arg(argc, argv, "--nside", "0"), 0);
   int start_day = to_int(get_arg(argc, argv, "--start_day", "432"), 432);
   int end_day   = to_int(get_arg(argc, argv, "--end_day", "450"), 450);
+  int dcf_start_day = to_int(get_arg(argc, argv, "--dcf_start_day", std::to_string(start_day)), start_day);
+  int dcf_end_day   = to_int(get_arg(argc, argv, "--dcf_end_day", std::to_string(end_day)), end_day);
   std::string in_dir  = norm_dir(get_arg(argc, argv, "--in_dir", ""));
   std::string out_dir = get_arg(argc, argv, "--out_dir", "");
   std::string gpus_s  = get_arg(argc, argv, "--gpus", "0");
@@ -461,7 +541,7 @@ int main(int argc, char** argv) {
   }
 
   if (in_dir.empty()) {
-    in_dir = (btag == "1M") ? "/data/zhaox/earth_1Mhz" : "/data/zhaox/earth_10Mhz";
+    in_dir = (btag == "1M") ? "../earth_1Mhz" : "../earth_10Mhz";
   }
   if (out_dir.empty()) {
     out_dir = std::string("./3dunified") + btag + ((blockage != 0) ? "_block/" : "_noblock/");
@@ -481,7 +561,7 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "btag=" << btag << " nside=" << nside << " npix=" << npix << "\n";
-  std::cout << "days=[" << start_day << "," << end_day << "] in_dir=" << in_dir << " out_dir=" << out_dir << "\n";
+  std::cout << "days=[" << start_day << "," << end_day << "] dcf_days=[" << dcf_start_day << "," << dcf_end_day << "] in_dir=" << in_dir << " out_dir=" << out_dir << "\n";
   std::cout << "gpus=" << gpus_s << " uvw_max=" << uvw_max << " blockage=" << blockage << "\n";
 
   // blockage phi（严格按 MATLAB）
@@ -491,6 +571,12 @@ int main(int argc, char** argv) {
   float theta0 = asinf(Rmoon / (Rmoon + h_moon));
   phi0 = (float)M_PI - theta0;
   std::cout << "blockage phi=" << phi0 << "\n";
+
+  float frequency = (btag == "1M") ? 1.0e6f : 1.0e7f;
+  float lamda = 3.0e8f / frequency;
+  float bl_max = 100.0e3f;
+  int nr = (int)ceilf(bl_max / lamda * 2.0f);
+  std::cout << "dcf nr=" << nr << "\n";
 
   HostTimer t_total; t_total.tic();
 
@@ -516,6 +602,41 @@ int main(int argc, char** argv) {
   for (long long i=0;i<npix;i++) hB[i] *= s_scale;
 
   std::cout << "load B/theta/phi OK, s=" << s_scale << ", time=" << t_io.toc_s() << " s\n";
+
+  HostTimer t_dcf; t_dcf.tic();
+  std::vector<float> h_dcf((size_t)nr + 1, 0.0f);
+  std::vector<unsigned long long> mb((size_t)nr, 0ULL);
+  std::vector<float> h_bll_scan((size_t)uvw_max);
+  std::string bll_suf = "day" + btag + ".txt";
+
+  for (int day = dcf_start_day; day <= dcf_end_day; ++day) {
+    std::string fbll = in_dir + "/bll" + std::to_string(day) + bll_suf;
+    int bll_n = 0;
+    if (!load_single_skip_first(fbll, h_bll_scan.data(), uvw_max, bll_n)) {
+      std::cerr << "[dcf] ERROR read " << fbll << "\n";
+      return 1;
+    }
+    for (int i=0; i<bll_n; ++i) {
+      float x = (h_bll_scan[i] - 0.25f) * 2.0f;
+      int g = (int)ceilf(x);
+      if (g < 0) g = 0;
+      if (g > nr) g = nr;
+      if (g >= 1 && g <= nr) mb[(size_t)g - 1]++;
+    }
+  }
+
+  h_dcf[0] = 1.0f / ((float)M_PI * 4.0f);
+  for (int idx=1; idx<=nr; ++idx) {
+    unsigned long long cnt = mb[(size_t)idx - 1];
+    if (cnt == 0ULL) {
+      h_dcf[(size_t)idx] = 0.0f;
+      continue;
+    }
+    float x = 0.5f * (float)idx + 0.25f;
+    float diff = 1.5f * x * x - 0.75f * x + 0.125f;
+    h_dcf[(size_t)idx] = (2.0f / 3.0f) * (float)M_PI * diff / (float)cnt;
+  }
+  std::cout << "dcf precompute time=" << t_dcf.toc_s() << " s\n";
 
   int G = (int)gpus.size();
   std::vector<GpuCtx> ctx(G);
@@ -564,8 +685,13 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_u, (size_t)uvw_max*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_v, (size_t)uvw_max*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_w, (size_t)uvw_max*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ctx[gi].d_bll, (size_t)uvw_max*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ctx[gi].d_gs, (size_t)uvw_max*sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&ctx[gi].d_dg, (size_t)uvw_max*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ctx[gi].d_weight, (size_t)uvw_max*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&ctx[gi].d_dcf, ((size_t)nr + 1)*sizeof(float)));
+    CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_dcf, h_dcf.data(), ((size_t)nr + 1)*sizeof(float), cudaMemcpyHostToDevice, ctx[gi].stream));
 
-    CHECK_CUDA(cudaMalloc(&ctx[gi].d_f, (size_t)uvw_max*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_xyz1a, (size_t)uvw_max*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_xyz1b, (size_t)uvw_max*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&ctx[gi].d_xyz1c, (size_t)uvw_max*sizeof(float)));
@@ -591,11 +717,12 @@ int main(int argc, char** argv) {
   hPhi.clear(); hPhi.shrink_to_fit();
 
   // host day buffers
-  std::vector<float> hu(uvw_max), hv(uvw_max), hw(uvw_max), hf(uvw_max), tmpf(uvw_max);
+  std::vector<float> hu(uvw_max), hv(uvw_max), hw(uvw_max), hbll(uvw_max), tmpf(uvw_max);
   std::vector<float> hxyz1a(uvw_max), hxyz1b(uvw_max), hxyz1c(uvw_max);
   std::vector<float> hxyz2a(uvw_max), hxyz2b(uvw_max), hxyz2c(uvw_max);
 
   std::vector<float2> hViss(uvw_max);
+  std::vector<float> hWeight(uvw_max);
 
   static const size_t OUT_BUF_SZ = 8 << 20;
   static thread_local std::vector<char> outbuf(OUT_BUF_SZ);
@@ -610,29 +737,26 @@ int main(int argc, char** argv) {
     std::string fuvw  = in_dir + "/updated_uvw" + std::to_string(day) + suf;
     std::string fxyz1 = in_dir + "/xyza" + std::to_string(day) + suf;
     std::string fxyz2 = in_dir + "/xyzb" + std::to_string(day) + suf;
+    std::string fbll  = in_dir + "/bll" + std::to_string(day) + suf;
 
-    int uvw_index=0, xyz1_index=0, xyz2_index=0;
+    int uvw_index=0, xyz1_index=0, xyz2_index=0, bll_index=0;
 
     if (!load_quad_skip_first(fuvw, hu.data(), hv.data(), hw.data(), tmpf.data(), uvw_max, uvw_index)) {
       std::cerr << "[day " << day << "] ERROR read " << fuvw << "\n";
       continue;
     }
     if (!load_triplets_skip_first(fxyz1, hxyz1a.data(), hxyz1b.data(), hxyz1c.data(), uvw_max, xyz1_index) ||
-        !load_triplets_skip_first(fxyz2, hxyz2a.data(), hxyz2b.data(), hxyz2c.data(), uvw_max, xyz2_index)) {
-      std::cerr << "[day " << day << "] ERROR read xyz files\n";
+        !load_triplets_skip_first(fxyz2, hxyz2a.data(), hxyz2b.data(), hxyz2c.data(), uvw_max, xyz2_index) ||
+        !load_single_skip_first(fbll, hbll.data(), uvw_max, bll_index)) {
+      std::cerr << "[day " << day << "] ERROR read xyz/bll files\n";
       continue;
     }
-    if (uvw_index <= 0 || xyz1_index != uvw_index || xyz2_index != uvw_index) {
+    if (uvw_index <= 0 || xyz1_index != uvw_index || xyz2_index != uvw_index || bll_index != uvw_index) {
       std::cerr << "[day " << day << "] ERROR index mismatch uvw=" << uvw_index
-                << " xyz1=" << xyz1_index << " xyz2=" << xyz2_index << "\n";
+                << " xyz1=" << xyz1_index << " xyz2=" << xyz2_index << " bll=" << bll_index << "\n";
       continue;
     }
     int amount = uvw_index;
-
-    for (int i=0;i<uvw_index;i++) {
-      float fp = tmpf[i];
-      hf[i] = (fp != 0.0f) ? (1.0f / fp) : 0.0f;
-    }
 
     double day_io_s = t_day_io.toc_s();
 
@@ -646,8 +770,8 @@ int main(int argc, char** argv) {
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_u, hu.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_v, hv.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_w, hw.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
+      CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_bll, hbll.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
 
-      CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_f, hf.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_xyz1a, hxyz1a.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_xyz1b, hxyz1b.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_xyz1c, hxyz1c.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
@@ -668,7 +792,7 @@ int main(int argc, char** argv) {
 
       float2* d_Vpart = ctx[gi].d_Viss; // scratch
 
-      constexpr int BASE_BLOCK = 128;
+      constexpr int BASE_BLOCK = 256;
       int grid = (amount + BASE_BLOCK - 1) / BASE_BLOCK;
       constexpr int TILE_PIX = 256;
       size_t shmem = (size_t)TILE_PIX * 4 * sizeof(float);
@@ -678,7 +802,7 @@ int main(int argc, char** argv) {
         ctx[gi].d_u, ctx[gi].d_v, ctx[gi].d_w,
         ctx[gi].d_xyz1a, ctx[gi].d_xyz1b, ctx[gi].d_xyz1c,
         ctx[gi].d_xyz2a, ctx[gi].d_xyz2b, ctx[gi].d_xyz2c,
-        phi0, blockage,
+        phi0,
         amount,
         d_Vpart
       );
@@ -699,7 +823,7 @@ int main(int argc, char** argv) {
     }
     double viss_s = t_viss.toc_s();
 
-    // phase correction on GPU0, then broadcast corrected Viss
+    // MATLAB: Viss *= exp(-i*2*pi*w), dg, gs, weight=min(dcf(gs)*dg,1/8), then broadcast
     HostTimer t_vfix; t_vfix.tic();
     {
       int gi0 = 0;
@@ -710,12 +834,20 @@ int main(int argc, char** argv) {
 
       const int BLOCK = 256;
       int grid = (uvw_index + BLOCK - 1) / BLOCK;
-      phase_correct_viss<<<grid, BLOCK, 0, stream>>>(ctx[gi0].d_Viss, ctx[gi0].d_w, uvw_index);
+
+      phase_correct_and_dg<<<grid, BLOCK, 0, stream>>>(ctx[gi0].d_Viss, ctx[gi0].d_w, ctx[gi0].d_bll, ctx[gi0].d_dg, uvw_index);
+      CHECK_CUDA(cudaPeekAtLastError());
+
+      ceilAndScale_opt<<<grid, BLOCK, 0, stream>>>(ctx[gi0].d_bll, ctx[gi0].d_gs, uvw_index, nr);
+      CHECK_CUDA(cudaPeekAtLastError());
+
+      precompute_weight<<<grid, BLOCK, 0, stream>>>(ctx[gi0].d_weight, ctx[gi0].d_dcf, ctx[gi0].d_dg, ctx[gi0].d_gs, uvw_index, nr);
       CHECK_CUDA(cudaPeekAtLastError());
 
       CHECK_CUDA(cudaStreamSynchronize(stream));
 
       CHECK_CUDA(cudaMemcpyAsync(hViss.data(), ctx[gi0].d_Viss, (size_t)uvw_index*sizeof(float2), cudaMemcpyDeviceToHost, stream));
+      CHECK_CUDA(cudaMemcpyAsync(hWeight.data(), ctx[gi0].d_weight, (size_t)uvw_index*sizeof(float), cudaMemcpyDeviceToHost, stream));
       CHECK_CUDA(cudaStreamSynchronize(stream));
     }
 
@@ -724,6 +856,7 @@ int main(int argc, char** argv) {
       CHECK_CUDA(cudaSetDevice(ctx[gi].dev));
       cudaStream_t stream = ctx[gi].stream;
       CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_Viss, hViss.data(), (size_t)uvw_index*sizeof(float2), cudaMemcpyHostToDevice, stream));
+      CHECK_CUDA(cudaMemcpyAsync(ctx[gi].d_weight, hWeight.data(), (size_t)uvw_index*sizeof(float), cudaMemcpyHostToDevice, stream));
       CHECK_CUDA(cudaStreamSynchronize(stream));
     }
     double vfix_s = t_vfix.toc_s();
@@ -739,13 +872,13 @@ int main(int argc, char** argv) {
       int grid = (int)((ctx[gi].n_chunk + BLOCK - 1) / BLOCK);
       constexpr int TILE_UVW = 256;
 
-      // su,sv,sw,sf (4) + xyz1(3) + xyz2(3) + inv1,inv2 (2) = 12 float arrays + Viss float2
+      // su,sv,sw,weight (4) + xyz1(3) + xyz2(3) + inv1,inv2 (2) = 12 float arrays + Viss float2
       size_t shmem = (size_t)TILE_UVW * (12 * sizeof(float) + sizeof(float2));
 
       computeC_real_chunk<TILE_UVW><<<grid, BLOCK, shmem, stream>>>(
         ctx[gi].n_chunk, ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n,
         ctx[gi].d_u, ctx[gi].d_v, ctx[gi].d_w,
-        ctx[gi].d_f,
+        ctx[gi].d_weight,
         ctx[gi].d_xyz1a, ctx[gi].d_xyz1b, ctx[gi].d_xyz1c,
         ctx[gi].d_xyz2a, ctx[gi].d_xyz2b, ctx[gi].d_xyz2c,
         phi0, blockage,
@@ -807,7 +940,11 @@ int main(int argc, char** argv) {
     if (ctx[gi].d_xyz1c) CHECK_CUDA(cudaFree(ctx[gi].d_xyz1c));
     if (ctx[gi].d_xyz1b) CHECK_CUDA(cudaFree(ctx[gi].d_xyz1b));
     if (ctx[gi].d_xyz1a) CHECK_CUDA(cudaFree(ctx[gi].d_xyz1a));
-    if (ctx[gi].d_f)     CHECK_CUDA(cudaFree(ctx[gi].d_f));
+    if (ctx[gi].d_dcf)   CHECK_CUDA(cudaFree(ctx[gi].d_dcf));
+    if (ctx[gi].d_weight) CHECK_CUDA(cudaFree(ctx[gi].d_weight));
+    if (ctx[gi].d_dg)    CHECK_CUDA(cudaFree(ctx[gi].d_dg));
+    if (ctx[gi].d_gs)    CHECK_CUDA(cudaFree(ctx[gi].d_gs));
+    if (ctx[gi].d_bll)   CHECK_CUDA(cudaFree(ctx[gi].d_bll));
 
     if (ctx[gi].d_w) CHECK_CUDA(cudaFree(ctx[gi].d_w));
     if (ctx[gi].d_v) CHECK_CUDA(cudaFree(ctx[gi].d_v));

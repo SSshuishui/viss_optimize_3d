@@ -34,6 +34,7 @@
 *.txt
 *.log
 *.csv
+*.bin
 
 earth_1Mhz/*.txt
 earth_10Mhz/*.txt

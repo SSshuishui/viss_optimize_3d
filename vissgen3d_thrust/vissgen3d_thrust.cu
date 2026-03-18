@@ -283,7 +283,7 @@ __global__ void precompute_weight(
 }
 
 // ===============================
-// Kernel 8：computeC（shared memory tiling）
+// Kernel 8：computeC（shared memory tiling, no blockage）
 // C[pix] = sum_i Viss[i]*weight[i]*exp(i*2*pi*(u*l + v*m + w*n))
 // ===============================
 __global__ void computeC_tiled(
@@ -359,7 +359,130 @@ __global__ void computeC_tiled(
 }
 
 // ===============================
-// Kernel 9：提取 C 实部（便于更快写文件）
+// Kernel 9：computeC（shared memory tiling, with blockage in recon only）
+// MATLAB 对应：
+//   gdcf2 = gdcf(gs).*gdg;
+//   beta1/beta2 超出 phi => gdcf2=0
+//   之后再做 1/8 截断
+// 这里 weight 已经等于 min(gdcf(gs).*gdg, 1/8)，
+// 因此只需在累加前做遮挡 mask：blocked ? 0 : weight
+// ===============================
+__global__ void computeC_tiled_blockage(
+    int npix,
+    const float* __restrict__ u,
+    const float* __restrict__ v,
+    const float* __restrict__ w,
+    const float* __restrict__ l,
+    const float* __restrict__ m,
+    const float* __restrict__ n,
+    const float* __restrict__ xyz1a,
+    const float* __restrict__ xyz1b,
+    const float* __restrict__ xyz1c,
+    const float* __restrict__ xyz2a,
+    const float* __restrict__ xyz2b,
+    const float* __restrict__ xyz2c,
+    const float* __restrict__ weight,
+    const Complex* __restrict__ Viss,
+    Complex* __restrict__ C,
+    int uvw_index,
+    float cosphi
+) {
+    int pix = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pix >= npix) return;
+
+    float lp = l[pix];
+    float mp = m[pix];
+    float np = n[pix];
+
+    float acc_re = 0.0f;
+    float acc_im = 0.0f;
+
+    extern __shared__ unsigned char smem[];
+    float* su    = (float*)smem;
+    float* sv    = su    + blockDim.x;
+    float* sw    = sv    + blockDim.x;
+    float* sW    = sw    + blockDim.x;
+    float2* sV   = (float2*)(sW + blockDim.x);
+    float* sx1a  = (float*)(sV   + blockDim.x);
+    float* sx1b  = sx1a  + blockDim.x;
+    float* sx1c  = sx1b  + blockDim.x;
+    float* sx2a  = sx1c  + blockDim.x;
+    float* sx2b  = sx2a  + blockDim.x;
+    float* sx2c  = sx2b  + blockDim.x;
+    float* sthr1 = sx2c  + blockDim.x;
+    float* sthr2 = sthr1 + blockDim.x;
+
+    for (int base = 0; base < uvw_index; base += blockDim.x) {
+        int i = base + threadIdx.x;
+
+        if (i < uvw_index) {
+            float x1a = xyz1a[i], x1b = xyz1b[i], x1c = xyz1c[i];
+            float x2a = xyz2a[i], x2b = xyz2b[i], x2c = xyz2c[i];
+
+            su[threadIdx.x]   = u[i];
+            sv[threadIdx.x]   = v[i];
+            sw[threadIdx.x]   = w[i];
+            sW[threadIdx.x]   = weight[i];
+            sV[threadIdx.x]   = make_float2(Viss[i].real(), Viss[i].imag());
+
+            sx1a[threadIdx.x] = x1a;
+            sx1b[threadIdx.x] = x1b;
+            sx1c[threadIdx.x] = x1c;
+            sx2a[threadIdx.x] = x2a;
+            sx2b[threadIdx.x] = x2b;
+            sx2c[threadIdx.x] = x2c;
+
+            sthr1[threadIdx.x] = norm3(x1a, x1b, x1c) * cosphi;
+            sthr2[threadIdx.x] = norm3(x2a, x2b, x2c) * cosphi;
+        } else {
+            su[threadIdx.x]   = 0.0f;
+            sv[threadIdx.x]   = 0.0f;
+            sw[threadIdx.x]   = 0.0f;
+            sW[threadIdx.x]   = 0.0f;
+            sV[threadIdx.x]   = make_float2(0.0f, 0.0f);
+
+            sx1a[threadIdx.x] = 0.0f;
+            sx1b[threadIdx.x] = 0.0f;
+            sx1c[threadIdx.x] = 0.0f;
+            sx2a[threadIdx.x] = 0.0f;
+            sx2b[threadIdx.x] = 0.0f;
+            sx2c[threadIdx.x] = 0.0f;
+            sthr1[threadIdx.x] = 0.0f;
+            sthr2[threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        int tileN = min(blockDim.x, uvw_index - base);
+        #pragma unroll 4
+        for (int t = 0; t < tileN; ++t) {
+            float dot1 = lp * sx1a[t] + mp * sx1b[t] + np * sx1c[t];
+            float dot2 = lp * sx2a[t] + mp * sx2b[t] + np * sx2c[t];
+
+            if (dot1 < sthr1[t] || dot2 < sthr2[t]) continue;
+
+            float phase = su[t] * lp + sv[t] * mp + sw[t] * np;
+            float angle = 2.0f * (float)M_PI * phase;
+
+            float s, c;
+            sincos_fast(angle, &s, &c);
+
+            float wt = sW[t];
+            float a = sV[t].x;
+            float b = sV[t].y;
+
+            acc_re += wt * (a * c - b * s);
+            acc_im += wt * (a * s + b * c);
+        }
+
+        __syncthreads();
+    }
+
+    C[pix] = Complex(acc_re, acc_im);
+}
+
+// ===============================
+// Kernel 10：提取 C 实部（便于更快写文件）
 // ===============================
 __global__ void extract_real(
     const Complex* __restrict__ C,
@@ -444,7 +567,7 @@ static float total_time = 0.0f;
 // ===============================
 // 主流程
 // ===============================
-int vissGen(float frequency)
+int vissGen(float frequency, int blockage)
 {
     gettimeofday(&start_tv, NULL);
 
@@ -516,6 +639,7 @@ int vissGen(float frequency)
     cout << "phi: " << phi << endl;
     cout << "lamda: " << lamda << endl;
     cout << "nr: " << nr << endl;
+    cout << "recon blockage: " << blockage << endl;
 
     // Host 侧先把 B *= s（避免每 day 重复缩放）
     vector<float> cB_scaled = cB;
@@ -524,7 +648,7 @@ int vissGen(float frequency)
     // 输出目录（按频率分开）
     // 你原 10MHz：3dnoblockage10M/...
     // 这里 1MHz：3dnoblockage1M/...
-    std::string out_dir = "3dnoblockage" + tag_short + "/";
+    std::string out_dir = (blockage ? "3dblockage" : "3dnoblockage") + tag_short + "/";
 
     // OpenMP：每线程控制一张 GPU
     #pragma omp parallel
@@ -745,7 +869,7 @@ int vissGen(float frequency)
                 CHECK(cudaPeekAtLastError());
             }
 
-            // computeC (noblockage)
+            // computeC (optional blockage in recon stage only)
             {
                 CHECK(cudaMemsetAsync(thrust::raw_pointer_cast(d_C.data()), 0,
                                       (size_t)npix * sizeof(Complex), stream));
@@ -753,21 +877,46 @@ int vissGen(float frequency)
                 constexpr int BLOCK = 256;
                 int grid = (npix + BLOCK - 1) / BLOCK;
 
-                size_t shmem = (size_t)BLOCK * (4 * sizeof(float) + sizeof(float2));
+                if (blockage) {
+                    size_t shmem = (size_t)BLOCK * (12 * sizeof(float) + sizeof(float2));
 
-                computeC_tiled<<<grid, BLOCK, shmem, stream>>>(
-                    npix,
-                    thrust::raw_pointer_cast(d_u.data()),
-                    thrust::raw_pointer_cast(d_v.data()),
-                    thrust::raw_pointer_cast(d_w.data()),
-                    thrust::raw_pointer_cast(d_l.data()),
-                    thrust::raw_pointer_cast(d_m.data()),
-                    thrust::raw_pointer_cast(d_n.data()),
-                    thrust::raw_pointer_cast(d_weight.data()),
-                    thrust::raw_pointer_cast(d_Viss.data()),
-                    thrust::raw_pointer_cast(d_C.data()),
-                    uvw_index
-                );
+                    computeC_tiled_blockage<<<grid, BLOCK, shmem, stream>>>(
+                        npix,
+                        thrust::raw_pointer_cast(d_u.data()),
+                        thrust::raw_pointer_cast(d_v.data()),
+                        thrust::raw_pointer_cast(d_w.data()),
+                        thrust::raw_pointer_cast(d_l.data()),
+                        thrust::raw_pointer_cast(d_m.data()),
+                        thrust::raw_pointer_cast(d_n.data()),
+                        thrust::raw_pointer_cast(d_xyz1a.data()),
+                        thrust::raw_pointer_cast(d_xyz1b.data()),
+                        thrust::raw_pointer_cast(d_xyz1c.data()),
+                        thrust::raw_pointer_cast(d_xyz2a.data()),
+                        thrust::raw_pointer_cast(d_xyz2b.data()),
+                        thrust::raw_pointer_cast(d_xyz2c.data()),
+                        thrust::raw_pointer_cast(d_weight.data()),
+                        thrust::raw_pointer_cast(d_Viss.data()),
+                        thrust::raw_pointer_cast(d_C.data()),
+                        uvw_index,
+                        cosf(phi)
+                    );
+                } else {
+                    size_t shmem = (size_t)BLOCK * (4 * sizeof(float) + sizeof(float2));
+
+                    computeC_tiled<<<grid, BLOCK, shmem, stream>>>(
+                        npix,
+                        thrust::raw_pointer_cast(d_u.data()),
+                        thrust::raw_pointer_cast(d_v.data()),
+                        thrust::raw_pointer_cast(d_w.data()),
+                        thrust::raw_pointer_cast(d_l.data()),
+                        thrust::raw_pointer_cast(d_m.data()),
+                        thrust::raw_pointer_cast(d_n.data()),
+                        thrust::raw_pointer_cast(d_weight.data()),
+                        thrust::raw_pointer_cast(d_Viss.data()),
+                        thrust::raw_pointer_cast(d_C.data()),
+                        uvw_index
+                    );
+                }
                 CHECK(cudaPeekAtLastError());
             }
 
@@ -838,5 +987,14 @@ int vissGen(float frequency)
 int main(int argc, char** argv)
 {
     float freq = 1e6f;
-    return vissGen(freq);
+    int blockage = 0;
+
+    if (argc >= 2) freq = strtof(argv[1], nullptr);
+    if (argc >= 3) blockage = atoi(argv[2]);
+
+    cout << "usage: " << argv[0] << " [frequency] [blockage]" << endl;
+    cout << "example: " << argv[0] << " 1e6 0" << endl;
+    cout << "example: " << argv[0] << " 1e6 1" << endl;
+
+    return vissGen(freq, blockage);
 }

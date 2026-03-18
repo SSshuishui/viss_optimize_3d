@@ -3,14 +3,14 @@
 // Adds --seed for stable random window selection (t1 per orbit).
 //
 // Build:
-//   nvcc -O3 -std=c++17 -arch=sm_89 orbit_gen_seeded.cu -o orbit_gen_seeded   (4090)
-//   nvcc -O3 -std=c++17 -arch=sm_86 orbit_gen_seeded.cu -o orbit_gen_seeded   (A6000)
+//   nvcc -O3 -std=c++17 -arch=sm_89 orbit_gen_nobll.cu -o orbit_gen_seeded   (4090)
+//   nvcc -O3 -std=c++17 -arch=sm_86 orbit_gen_nobll.cu -o orbit_gen_seeded   (A6000)
 //
 // Run:
 //   ./orbit_gen_seeded --only=10M --start=1 --end=1 --device=0 --seed=12345
 //
 // Notes:
-// - This code generates ONE uvw/xyza/xyzb/bll per day (same behavior as your current orbit_gen.cu).
+// - This code generates ONE uvw/xyza/xyzb per day (same behavior as your current orbit_gen.cu).
 // - Randomness (t1 selection) is deterministic given --seed and dayid.
 // - It does NOT attempt to exactly match MATLAB's RNG stream; it guarantees reproducibility in CUDA/C++.
 
@@ -94,17 +94,6 @@ static void write_txt_3cols(const std::string& fn, const float* a, const float* 
   setvbuf(f, buf, _IOFBF, sizeof(buf));
   for (size_t i=0;i<n;i++) {
     fprintf(f, "%.15f %.15f %.15f\n", (double)a[i], (double)b[i], (double)c[i]);
-  }
-  fclose(f);
-}
-
-static void write_txt_1col(const std::string& fn, const float* a, size_t n) {
-  FILE* f = fopen(fn.c_str(), "wt");
-  if (!f) { perror(("fopen " + fn).c_str()); std::exit(1); }
-  static char buf[1<<20];
-  setvbuf(f, buf, _IOFBF, sizeof(buf));
-  for (size_t i=0;i<n;i++) {
-    fprintf(f, "%.15f\n", (double)a[i]);
   }
   fclose(f);
 }
@@ -289,35 +278,20 @@ void k_gather_pos(const float* x, const float* y, const float* z,
 }
 
 __global__
-void k_compute_uvw_xyz_bll(const float* pos, int posnum, float lambda_m,
-                           float* u, float* v, float* w,
-                           float* x1, float* y1, float* z1,
-                           float* x2, float* y2, float* z2,
-                           float* bll)
+void k_compute_uvw_xyz(const float* pos, int posnum, float lambda_m,
+                       float* u, float* v, float* w,
+                       float* x1, float* y1, float* z1,
+                       float* x2, float* y2, float* z2)
 {
   const int amount = SATNUM * (SATNUM - 1) / 2;
-  const int outN = 1 + 2 * amount * posnum;
+  const int outN = 2 * amount * posnum;
 
   const int outIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (outIdx >= outN) return;
 
-  if (outIdx == 0) {
-    u[0] = v[0] = w[0] = 0.0f;
-    const int base0 = 0 * (3 * SATNUM);
-    const float Bx = pos[base0 + 0];
-    const float By = pos[base0 + SATNUM + 0];
-    const float Bz = pos[base0 + 2*SATNUM + 0];
-
-    x1[0] = Bx; y1[0] = By; z1[0] = Bz;
-    x2[0] = Bx; y2[0] = By; z2[0] = Bz;
-    bll[0] = 0.0f;
-    return;
-  }
-
-  const int t = outIdx - 1;
   const int basePerTime = 2 * amount;
-  const int timeIdx = t / basePerTime;
-  const int baseIdx = t - timeIdx * basePerTime;
+  const int timeIdx = outIdx / basePerTime;
+  const int baseIdx = outIdx - timeIdx * basePerTime;
 
   const int k = baseIdx % amount;
   const int m = d_pair_m[k];
@@ -350,8 +324,6 @@ void k_compute_uvw_xyz_bll(const float* pos, int posnum, float lambda_m,
     x1[outIdx] = xm; y1[outIdx] = ym; z1[outIdx] = zm;
     x2[outIdx] = xn; y2[outIdx] = yn; z2[outIdx] = zn;
   }
-
-  bll[outIdx] = sqrtf(du*du + dv*dv + dw*dw);
 }
 
 // -------------------------
@@ -373,7 +345,7 @@ static void run_case(float frequency, const std::string& tag,
             << "  seed=" << seed
             << " ===\n";
 
-  const std::string filepath = "./earth_" + tag + "hz_cuda/";
+  const std::string filepath = "./earth_" + tag + "hz/";
   ensure_dir(filepath);
 
   const float u0 = 100e3f / 23.0f;
@@ -410,28 +382,25 @@ static void run_case(float frequency, const std::string& tag,
   CUDA_CHECK(cudaMalloc(&d_pos, (size_t)posnum * (3*SATNUM) * sizeof(float)));
 
   const int amount = SATNUM*(SATNUM-1)/2;
-  const int outN = 1 + 2 * amount * posnum;
+  const int outN = 2 * amount * posnum;
 
   float *d_u=nullptr,*d_v=nullptr,*d_w=nullptr;
   float *d_x1=nullptr,*d_y1=nullptr,*d_z1=nullptr;
   float *d_x2=nullptr,*d_y2=nullptr,*d_z2=nullptr;
-  float *d_bll=nullptr;
 
-  CUDA_CHECK(cudaMalloc(&d_u,   (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_v,   (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_w,   (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_x1,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_y1,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_z1,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_x2,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_y2,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_z2,  (size_t)outN * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_bll, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_u,  (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_v,  (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_w,  (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_x1, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_y1, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_z1, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_x2, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_y2, (size_t)outN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_z2, (size_t)outN * sizeof(float)));
 
   std::vector<float> h_u(outN), h_v(outN), h_w(outN);
   std::vector<float> h_x1(outN), h_y1(outN), h_z1(outN);
   std::vector<float> h_x2(outN), h_y2(outN), h_z2(outN);
-  std::vector<float> h_bll(outN);
 
   const int BS = 256;
 
@@ -503,38 +472,34 @@ static void run_case(float frequency, const std::string& tag,
       CUDA_CHECK(cudaGetLastError());
     }
 
-    // 5) uvw/xyz/bll
+    // 5) uvw/xyz
     {
       const int GS = (outN + BS - 1) / BS;
-      k_compute_uvw_xyz_bll<<<GS, BS>>>(d_pos, posnum, lambda_m,
-                                        d_u, d_v, d_w,
-                                        d_x1, d_y1, d_z1,
-                                        d_x2, d_y2, d_z2,
-                                        d_bll);
+      k_compute_uvw_xyz<<<GS, BS>>>(d_pos, posnum, lambda_m,
+                                    d_u, d_v, d_w,
+                                    d_x1, d_y1, d_z1,
+                                    d_x2, d_y2, d_z2);
       CUDA_CHECK(cudaGetLastError());
     }
 
-    CUDA_CHECK(cudaMemcpy(h_u.data(),   d_u,   (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_v.data(),   d_v,   (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_w.data(),   d_w,   (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_x1.data(),  d_x1,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_y1.data(),  d_y1,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_z1.data(),  d_z1,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_x2.data(),  d_x2,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_y2.data(),  d_y2,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_z2.data(),  d_z2,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_bll.data(), d_bll, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_u.data(),  d_u,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_v.data(),  d_v,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_w.data(),  d_w,  (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_x1.data(), d_x1, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_y1.data(), d_y1, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_z1.data(), d_z1, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_x2.data(), d_x2, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_y2.data(), d_y2, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_z2.data(), d_z2, (size_t)outN*sizeof(float), cudaMemcpyDeviceToHost));
 
-    char fn1[512], fn2[512], fn3[512], fn4[512];
+    char fn1[512], fn2[512], fn3[512];
     snprintf(fn1, sizeof(fn1), "%suvw%dday%s.txt",  filepath.c_str(), dayid, tag.c_str());
     snprintf(fn2, sizeof(fn2), "%sxyza%dday%s.txt", filepath.c_str(), dayid, tag.c_str());
     snprintf(fn3, sizeof(fn3), "%sxyzb%dday%s.txt", filepath.c_str(), dayid, tag.c_str());
-    snprintf(fn4, sizeof(fn4), "%sbll%dday%s.txt",  filepath.c_str(), dayid, tag.c_str());
 
     write_txt_3cols(fn1, h_u.data(),  h_v.data(),  h_w.data(),  (size_t)outN);
     write_txt_3cols(fn2, h_x1.data(), h_y1.data(), h_z1.data(), (size_t)outN);
     write_txt_3cols(fn3, h_x2.data(), h_y2.data(), h_z2.data(), (size_t)outN);
-    write_txt_1col (fn4, h_bll.data(), (size_t)outN);
   }
 
   CUDA_CHECK(cudaFree(d_r1));
@@ -557,7 +522,6 @@ static void run_case(float frequency, const std::string& tag,
   CUDA_CHECK(cudaFree(d_x2));
   CUDA_CHECK(cudaFree(d_y2));
   CUDA_CHECK(cudaFree(d_z2));
-  CUDA_CHECK(cudaFree(d_bll));
 }
 
 // -------------------------
@@ -587,7 +551,7 @@ int main(int argc, char** argv) {
   if (end_day < start_day) std::swap(start_day, end_day);
 
   std::string only = get_arg(argc, argv, "--only", "all");
-  uint64_t seed = to_u64(get_arg(argc, argv, "--seed", "42"), 1234567ULL);
+  uint64_t seed = to_u64(get_arg(argc, argv, "--seed", "12345"), 1234567ULL);
 
   if (only == "1M" || only == "all")  run_case(1e6f, "1M",  start_day, end_day, seed);
   if (only == "10M"|| only == "all")  run_case(1e7f, "10M", start_day, end_day, seed);
