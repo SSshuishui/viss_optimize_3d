@@ -24,6 +24,15 @@
   - 可以理解为当前这一系列工作的渐进优化版本
   - 适合做性能优化、并行计算加速与论文实验的主实现
 
+- [vissfast](`vissfast/`)
+  - viss阶段加入快速判断通道，提高速度（同[二维算法](https://github.com/SSshuishui/viss_optimize_ws)）
+
+- [half_native](`half_native`)
+  - 基线部分和后续全程只保留一半的内容，在数学上保持一致
+
+- [system_viss_recon](`system_viss_recon`)
+  - 去掉blockage的判断，recon阶段只考虑加入遮挡的逻辑
+  - 把viss和recon两个阶段统一了，复用中间部分计算遮挡的逻辑，提高速度
 
 ## 使用建议
 
@@ -33,5 +42,8 @@
 2. [recon_seg_3d](`recon_seg_3d/`)
 3. [viss_conj_recon_seg](`viss_conj_recon_seg/`)
 4. [viss_recon_tile](`viss_recon_tile/`)
+5. [vissfast](`vissfast/`)
+6. [half_native](`half_native`)
+7. [system_viss_recon](`system_viss_recon`)
 
 这样更容易理解每一步优化引入的位置、作用和收益。
