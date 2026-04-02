@@ -62,6 +62,23 @@
       - 其他 GPU：能 peer copy 就直接拷过去，不能 peer copy 再回退到本地算
     - 消掉了多卡上重复的权重生成，让 pair_weight_half 真正变成 shared operator plan 的一部分，而不是每卡各自现算的局部状态
 
+- [shared_operator_plan_load_balance](`shared_operator_plan_load_balance`) 
+  - 统计每个GPU上的负载
+
+- [shared_operator_plan_stage2_balance](`shared_operator_plan_stage2_balance`) (10Mhz 107s, 4*4090)
+  - Stage-2 改成 block-cyclic 像素分区
+    - 把全图按 固定大小的 recon pixel block 切块
+    - 这些块按 round-robin 分给不同 GPU
+    - 这样每张 GPU 会拿到更混合的天空区域，而不是原来那种连续大块区域
+    - 默认参数是： `--recon_balance_block_tiles 256` 
+      - 也就是每个 Stage-2 块大小为： `256 * RECON_TILE_PIX_HOST`
+      - 当前 `RECON_TILE_PIX_HOST=256`, 所以默认一个负载均衡块是 65536 个像素. 这样做的目的就是让 vv 任务在 GPU 之间更平均
+  - Stage-2 使用独立的 recon 像素数组
+    - 给 Stage-2 单独加了：d_l_recon、d_m_recon、d_n_recon、recon_n_chunk
+    也就是说：Stage-1 还是原来的连续 chunk， Stage-2 改成新的 block-cyclic 分区
+  - Stage-2 的 tile cone metadata 也基于新分区重建
+  - 输出文件仍然保持全局像素顺序
+    - 把输出改成：按全局 block 顺序遍历， 找到这个 block 属于哪张 GPU， 从该 GPU 的 d_Cacc 对应偏移拷出， 依然按全局正确顺序写回文件
 
 ## 使用建议
 
