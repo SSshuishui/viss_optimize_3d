@@ -3,7 +3,7 @@ set -euo pipefail
 
 # build
 # nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp dcf_mb_gen.cu -o dcf_mb_gen
-nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp main_3d_vissfast.cu -o main_3d_vissfast
+# nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp main_3d_vissfast.cu -o main_3d_vissfast
 
 # ------------------------------------------------------------
 # step 1: generate stable dcf+mb once and save to bin
@@ -18,6 +18,16 @@ nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp main_3d_vissfa
 #   --orbit_seed=42 \
 #   --out=dcf_mb_10M_days450_seed42.bin
 
+# ./dcf_mb_gen \
+#   --btag=30M \
+#   --dcf_days=450 \
+#   --segs=10 \
+#   --bl_max=100000 \
+#   --gpus=1,2 \
+#   --gen_gpu_index=0 \
+#   --orbit_seed=42 \
+#   --out=dcf_mb_30M_days450_seed42.bin
+
 # ------------------------------------------------------------
 # step 2: load B + dcf/mb bin, then run viss + 3D recon
 # ------------------------------------------------------------
@@ -27,12 +37,29 @@ nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp main_3d_vissfa
   --day_start=1 \
   --day_count=1 \
   --segs=10 \
-  --sky_dir=../earth_10Mhz \
-  --out_dir=../out10M_3d_shared_operator_v2 \
-  --gpus=0,1,2,3 \
+  --sky_dir=../earth_10Mhz/10.0MHz_with_absorption_split.bin \
+  --out_dir=../out10M_3d_stage2_balance_absorption_split/ \
+  --gpus=0,1 \
   --gen_gpu_index=0 \
-  --B_mode=txt \
+  --B_mode=bin \
   --C_mode=bin \
   --orbit_seed=42 \
   --dcf_bin=dcf_mb_10M_days450_seed42.bin \
-  --viss_tile_pix=512 
+  --viss_tile_pix=256 
+
+
+# ./main_3d_vissfast \
+#   --btag=30M \
+#   --nside=16384 \
+#   --day_start=1 \
+#   --day_count=1 \
+#   --segs=10 \
+#   --sky_dir=../earth_30Mhz \
+#   --out_dir=../out30M_3d_stage2_balance/ \
+#   --gpus=1,2 \
+#   --gen_gpu_index=0 \
+#   --B_mode=bin \
+#   --C_mode=bin \
+#   --orbit_seed=42 \
+#   --dcf_bin=dcf_mb_30M_days450_seed42.bin \
+#   --viss_tile_pix=512 

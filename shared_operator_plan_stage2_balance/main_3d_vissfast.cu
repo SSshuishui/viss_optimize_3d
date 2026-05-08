@@ -74,6 +74,7 @@ int main(int argc,char** argv){
   int gen_gpu_index=to_int(get_arg(argc,argv,"--gen_gpu_index","0"),0);
   int reducer_gpu_index=to_int(get_arg(argc,argv,"--reducer_gpu_index","-1"),-1);
   uint64_t orbit_seed=to_u64(get_arg(argc,argv,"--orbit_seed","42"), 12345ULL);
+  std::string sky_order = get_arg(argc, argv, "--sky_order", "ring");
 
   std::string sky_dir=norm_dir(get_arg(argc,argv,"--sky_dir",""));
   std::string out_dir=get_arg(argc,argv,"--out_dir","./out_direct3d/");
@@ -155,6 +156,29 @@ int main(int argc,char** argv){
     return 1;
   }
   std::cout<<"Loaded B from "<<used_B_path<<" in "<<t_io.toc_s()<<" s\n";
+
+  // C=single(B.*s);  
+  const double pix_area = 4.0 * M_PI / (double)npix;
+  #pragma omp parallel for
+  for (long long i = 0; i < npix; ++i) {
+    hB[i] = (float)((double)hB[i] * pix_area);
+  }
+  std::cout << " pix_area=" << pix_area
+            << " inv_pix_area=" << (1.0 / pix_area)
+            << "\n";
+
+  const double pix_area = 4.0 * M_PI / (double)npix;
+
+  // C=single(B.*s);  
+  #pragma omp parallel for
+  for (long long i = 0; i < npix; ++i) {
+    hB[i] = (float)((double)hB[i] * pix_area);
+  }
+
+  std::cout << "apply_pixel_area=" << apply_pixel_area
+            << " pix_area=" << pix_area
+            << " inv_pix_area=" << (1.0 / pix_area)
+            << "\n";
 
   float lambda_m = lamda;
   int OrbitRes = (int)std::ceil((double)(2.0 * M_PI) * (double)(100e3 / (double)lambda_m));
@@ -306,8 +330,15 @@ int main(int argc,char** argv){
 
     int BLOCK=256;
     int grid=(int)((n_chunk+BLOCK-1)/BLOCK);
-    pix2lmn_nest_kernel<<<grid,BLOCK,0,ctx[gi].xfer_stream>>>(
-      nside, (unsigned int)pix0, (int)n_chunk, ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    if (sky_order == "ring") {
+      pix2lmn_ring_kernel<<<grid, BLOCK, 0, ctx[gi].xfer_stream>>>(
+        nside, (unsigned int)pix0, (int)n_chunk,
+        ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    } else {
+      pix2lmn_nest_kernel<<<grid, BLOCK, 0, ctx[gi].xfer_stream>>>(
+        nside, (unsigned int)pix0, (int)n_chunk,
+        ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    }
     CHECK_CUDA(cudaPeekAtLastError());
     int grid_nm1=(int)((n_chunk+255)/256);
     build_nm1_kernel<<<grid_nm1,256,0,ctx[gi].xfer_stream>>>(ctx[gi].d_n, ctx[gi].d_nm1, ctx[gi].n_chunk);    launch_build_tile_cone_meta_runtime(viss_tile_pix, ctx[gi].xfer_stream,
@@ -316,11 +347,19 @@ int main(int argc,char** argv){
       ctx[gi].d_tile_cosA_viss, ctx[gi].d_tile_sinA_viss, ctx[gi].ntile_viss);
     for(const auto &rb : recon_blocks_by_gpu[gi]){
       int grid_recon=(int)((rb.len+BLOCK-1)/BLOCK);
-      pix2lmn_nest_kernel<<<grid_recon,BLOCK,0,ctx[gi].xfer_stream>>>(
-        nside, (unsigned int)rb.global_pix0, rb.len,
-        ctx[gi].d_l_recon + rb.owner_off,
-        ctx[gi].d_m_recon + rb.owner_off,
-        ctx[gi].d_n_recon + rb.owner_off);
+      if (sky_order == "ring") {
+        pix2lmn_ring_kernel<<<grid_recon, BLOCK, 0, ctx[gi].xfer_stream>>>(
+          nside, (unsigned int)rb.global_pix0, rb.len,
+          ctx[gi].d_l_recon + rb.owner_off,
+          ctx[gi].d_m_recon + rb.owner_off,
+          ctx[gi].d_n_recon + rb.owner_off);
+      } else {
+        pix2lmn_nest_kernel<<<grid_recon, BLOCK, 0, ctx[gi].xfer_stream>>>(
+          nside, (unsigned int)rb.global_pix0, rb.len,
+          ctx[gi].d_l_recon + rb.owner_off,
+          ctx[gi].d_m_recon + rb.owner_off,
+          ctx[gi].d_n_recon + rb.owner_off);
+      }
       CHECK_CUDA(cudaPeekAtLastError());
     }
     launch_build_tile_cone_meta_runtime(RECON_TILE_PIX_HOST, ctx[gi].xfer_stream,
@@ -797,7 +836,7 @@ int main(int argc,char** argv){
                   << "@chunk=" << st.max_chunk_plan_wait_idx
                   << "\n";
         accumulate_recon_gpu_load_stats(day_recon_gpu_stats[gi], st);
-        stage2_gpu_rows.push_back(Stage2GpuLoadCsvRow{dayid, s+1, gi, st.gpu_dev, st.chunks, st.zero_task_chunks, st.vv_only_chunks, st.mixed_chunks, st.vv_tasks, st.mixed_tasks, st.host_plan_wait_s, st.gpu_plan_build_s, st.sync_wait_s, st.run_wall_s, seg_imbalance_ratio});
+        // stage2_gpu_rows.push_back(Stage2GpuLoadCsvRow{dayid, s+1, gi, st.gpu_dev, st.chunks, st.zero_task_chunks, st.vv_only_chunks, st.mixed_chunks, st.vv_tasks, st.mixed_tasks, st.host_plan_wait_s, st.gpu_plan_build_s, st.sync_wait_s, st.run_wall_s, seg_imbalance_ratio});
       }
     }
 
@@ -820,43 +859,43 @@ int main(int argc,char** argv){
               << "T_recon_sum=" << day_recon_sum << "s "
               << "T_day_segment_loop=" << T_day_segment_loop << "s\n";
 
-    {
-      std::string metrics_csv = out_dir + "stage1_metrics_day" + std::to_string(dayid) + "_" + btag + ".csv";
-      std::ofstream mofs(metrics_csv);
-      if(mofs.is_open()){
-        mofs << "day,seg_idx,t0,tlen,segN,segN_half,T_gen,T_bcast,T_viss_kernel,T_reduce,T_phase,T_output_stage,T_stage1_total,T_wall,overlap_efficiency,multi_gpu_scaling_efficiency\n";
-        mofs << std::setprecision(10);
-        for(const auto& m : stage1_metrics){
-          mofs << m.dayid << ','
-               << m.seg_idx << ','
-               << m.t0 << ','
-               << m.tlen << ','
-               << m.segN << ','
-               << m.segN_half << ','
-               << m.T_gen << ','
-               << m.T_bcast << ','
-               << m.T_viss_kernel << ','
-               << m.T_reduce << ','
-               << m.T_phase << ','
-               << m.T_output_stage << ','
-               << m.T_stage1_total << ','
-               << m.T_wall << ','
-               << m.overlap_efficiency << ','
-               << m.multi_gpu_scaling_efficiency << "\n";
-        }
-        mofs << "summary,0,0,0,0,0,"
-             << stage1_sum_gen << ','
-             << stage1_sum_bcast << ','
-             << stage1_sum_viss_kernel << ','
-             << stage1_sum_reduce << ','
-             << stage1_sum_phase << ','
-             << stage1_sum_output << ','
-             << stage1_sum_wall_active << ','
-             << T_day_segment_loop << ','
-             << overlap_eff_day << ','
-             << mgpu_scaling_eff_day << "\n";
-      }
-    }
+    // {
+    //   std::string metrics_csv = out_dir + "stage1_metrics_day" + std::to_string(dayid) + "_" + btag + ".csv";
+    //   std::ofstream mofs(metrics_csv);
+    //   if(mofs.is_open()){
+    //     mofs << "day,seg_idx,t0,tlen,segN,segN_half,T_gen,T_bcast,T_viss_kernel,T_reduce,T_phase,T_output_stage,T_stage1_total,T_wall,overlap_efficiency,multi_gpu_scaling_efficiency\n";
+    //     mofs << std::setprecision(10);
+    //     for(const auto& m : stage1_metrics){
+    //       mofs << m.dayid << ','
+    //            << m.seg_idx << ','
+    //            << m.t0 << ','
+    //            << m.tlen << ','
+    //            << m.segN << ','
+    //            << m.segN_half << ','
+    //            << m.T_gen << ','
+    //            << m.T_bcast << ','
+    //            << m.T_viss_kernel << ','
+    //            << m.T_reduce << ','
+    //            << m.T_phase << ','
+    //            << m.T_output_stage << ','
+    //            << m.T_stage1_total << ','
+    //            << m.T_wall << ','
+    //            << m.overlap_efficiency << ','
+    //            << m.multi_gpu_scaling_efficiency << "\n";
+    //     }
+    //     mofs << "summary,0,0,0,0,0,"
+    //          << stage1_sum_gen << ','
+    //          << stage1_sum_bcast << ','
+    //          << stage1_sum_viss_kernel << ','
+    //          << stage1_sum_reduce << ','
+    //          << stage1_sum_phase << ','
+    //          << stage1_sum_output << ','
+    //          << stage1_sum_wall_active << ','
+    //          << T_day_segment_loop << ','
+    //          << overlap_eff_day << ','
+    //          << mgpu_scaling_eff_day << "\n";
+    //   }
+    // }
 
     double day_stage2_run_sum = 0.0, day_stage2_run_max = 0.0;
     long long day_stage2_vv = 0, day_stage2_mixed = 0;
@@ -892,20 +931,20 @@ int main(int argc,char** argv){
                 << "@chunk=" << st.max_chunk_plan_wait_idx
                 << "\n";
     }
-    {
-      std::string load_csv = out_dir + "stage2_balance" + std::to_string(dayid) + "_" + btag + ".csv";
-      std::ofstream lofs(load_csv);
-      if(lofs.is_open()){
-        lofs << "day,seg_idx,gpu_index,gpu_dev,chunks,zero_task_chunks,vv_only_chunks,mixed_chunks,vv_tasks,mixed_tasks,host_plan_wait_s,gpu_plan_build_s,sync_wait_s,run_wall_s,imbalance_ratio_run\n";
-        lofs << std::setprecision(10);
-        for(const auto &r : stage2_gpu_rows){
-          lofs << r.dayid << ',' << r.seg_idx << ',' << r.gpu_index << ',' << r.gpu_dev << ','
-               << r.chunks << ',' << r.zero_task_chunks << ',' << r.vv_only_chunks << ',' << r.mixed_chunks << ','
-               << r.vv_tasks << ',' << r.mixed_tasks << ',' << r.host_plan_wait_s << ',' << r.gpu_plan_build_s << ','
-               << r.sync_wait_s << ',' << r.run_wall_s << ',' << r.imbalance_ratio_run << "\n";
-        }
-      }
-    }
+    // {
+    //   std::string load_csv = out_dir + "stage2_balance" + std::to_string(dayid) + "_" + btag + ".csv";
+    //   std::ofstream lofs(load_csv);
+    //   if(lofs.is_open()){
+    //     lofs << "day,seg_idx,gpu_index,gpu_dev,chunks,zero_task_chunks,vv_only_chunks,mixed_chunks,vv_tasks,mixed_tasks,host_plan_wait_s,gpu_plan_build_s,sync_wait_s,run_wall_s,imbalance_ratio_run\n";
+    //     lofs << std::setprecision(10);
+    //     for(const auto &r : stage2_gpu_rows){
+    //       lofs << r.dayid << ',' << r.seg_idx << ',' << r.gpu_index << ',' << r.gpu_dev << ','
+    //            << r.chunks << ',' << r.zero_task_chunks << ',' << r.vv_only_chunks << ',' << r.mixed_chunks << ','
+    //            << r.vv_tasks << ',' << r.mixed_tasks << ',' << r.host_plan_wait_s << ',' << r.gpu_plan_build_s << ','
+    //            << r.sync_wait_s << ',' << r.run_wall_s << ',' << r.imbalance_ratio_run << "\n";
+    //     }
+    //   }
+    // }
 
     double T_recon_day_wall = t_rec.toc_s();
     std::cout<<"Direct 3D recon done in "<<T_recon_day_wall<<" s\n";

@@ -267,6 +267,68 @@ __global__ void pix2lmn_nest_kernel(
   n[tid] = st;
 }
 
+__global__ void pix2lmn_ring_kernel(
+    int nside,
+    unsigned int base_ipix,
+    int chunkN,
+    float* __restrict__ l,
+    float* __restrict__ m,
+    float* __restrict__ n)
+{
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= chunkN) return;
+
+  const double PI = 3.141592653589793238462643383279502884;
+
+  unsigned long long ipix = (unsigned long long)base_ipix + (unsigned long long)tid;
+  unsigned long long ipix1 = ipix + 1ull;  // HEALPix RING formula uses 1-based index
+
+  unsigned long long ns = (unsigned long long)nside;
+  unsigned long long nl2 = 2ull * ns;
+  unsigned long long nl4 = 4ull * ns;
+  unsigned long long ncap = 2ull * ns * (ns - 1ull);
+  unsigned long long npix = 12ull * ns * ns;
+
+  double z;
+  double phi;
+
+  if (ipix1 <= ncap) {
+    // North polar cap
+    int iring = (int)(0.5 * (1.0 + sqrt(1.0 + 2.0 * (double)ipix1)));
+    unsigned long long iphi = ipix1 - 2ull * (unsigned long long)iring * (unsigned long long)(iring - 1);
+
+    z = 1.0 - ((double)iring * (double)iring) / (3.0 * (double)ns * (double)ns);
+    phi = ((double)iphi - 0.5) * PI / (2.0 * (double)iring);
+  }
+  else if (ipix1 <= nl2 * (5ull * ns + 1ull)) {
+    // Equatorial region
+    unsigned long long ip = ipix1 - ncap - 1ull;
+    int iring = (int)(ip / nl4) + nside;
+    unsigned long long iphi = (ip % nl4) + 1ull;
+
+    double fodd = 0.5 * (1.0 + (double)((iring + nside) & 1));
+
+    z = ((double)(2 * nside - iring)) * 2.0 / (3.0 * (double)nside);
+    phi = ((double)iphi - fodd) * PI / (2.0 * (double)nside);
+  }
+  else {
+    // South polar cap
+    unsigned long long ip = npix - ipix1 + 1ull;
+    int iring = (int)(0.5 * (1.0 + sqrt(1.0 + 2.0 * (double)ip)));
+    unsigned long long iphi =
+        4ull * (unsigned long long)iring + 1ull
+        - (ip - 2ull * (unsigned long long)iring * (unsigned long long)(iring - 1));
+
+    z = -1.0 + ((double)iring * (double)iring) / (3.0 * (double)ns * (double)ns);
+    phi = ((double)iphi - 0.5) * PI / (2.0 * (double)iring);
+  }
+
+  double sintheta = sqrt(fmax(0.0, 1.0 - z * z));
+
+  l[tid] = (float)(sintheta * cos(phi));
+  m[tid] = (float)(sintheta * sin(phi));
+  n[tid] = (float)z;
+}
 
 template<int TILE_PIX, bool DO_BLOCKAGE>
 __global__ void viss_partial_all(
@@ -597,92 +659,6 @@ __global__ void build_sat_raw_from_pos(const float* __restrict__ pos,
   satz[idx] = pos[base + 2*SATNUM + s];
 }
 
-template<int TILE_PIX, bool DO_BLOCKAGE>
-__global__ void viss_partial_all_halfsym_reuse_sat(
-    const float* __restrict__ B,
-    const float* __restrict__ l,
-    const float* __restrict__ m,
-    const float* __restrict__ n,
-    long long n_chunk,
-    const float* __restrict__ u,
-    const float* __restrict__ v,
-    const float* __restrict__ w,
-    const float* __restrict__ satx,
-    const float* __restrict__ saty,
-    const float* __restrict__ satz,
-    int N_half,
-    float cosphi,
-    float2* __restrict__ Vpart)
-{
-  int ih = blockIdx.x * blockDim.x + threadIdx.x;
-  bool active = (ih < N_half);
-
-  int group = 0, j = 0, i = 0;
-  float u0 = 0.0f, v0 = 0.0f, w0 = 0.0f;
-  int sat_m = 0, sat_n = 0;
-  if(active){
-    group = ih / UNIQUE_BASELINES_PER_T;
-    j     = ih - group * UNIQUE_BASELINES_PER_T;
-    i     = group * SIGNED_BASELINES_PER_T + j;
-    u0 = u[i]; v0 = v[i]; w0 = w[i];
-    sat_m = d_pair_m[j];
-    sat_n = d_pair_n[j];
-  }
-
-  float acc_re = 0.0f, acc_im = 0.0f;
-  const float k = -2.0f * (float)M_PI;
-
-  extern __shared__ float smem[];
-  float* sB = smem;
-  float* sL = sB + TILE_PIX;
-  float* sM = sL + TILE_PIX;
-  float* sN = sM + TILE_PIX;
-
-  for(long long p0 = 0; p0 < n_chunk; p0 += TILE_PIX){
-    for(int lane = threadIdx.x; lane < TILE_PIX; lane += blockDim.x){
-      long long p = p0 + lane;
-      if(p < n_chunk){
-        sB[lane] = B[p];
-        sL[lane] = l[p];
-        sM[lane] = m[p];
-        sN[lane] = n[p];
-      }else{
-        sB[lane] = 0.0f; sL[lane] = 0.0f; sM[lane] = 0.0f; sN[lane] = 0.0f;
-      }
-    }
-    __syncthreads();
-
-    if(active){
-      int tileN = (int)min((long long)TILE_PIX, n_chunk - p0);
-      int sat_base = group * SATNUM;
-      #pragma unroll 4
-      for(int k0=0; k0<tileN; ++k0){
-        float lp = sL[k0], mp = sM[k0], npv = sN[k0];
-        if constexpr (DO_BLOCKAGE){
-          bool vis[SATNUM];
-          #pragma unroll
-          for(int s=0; s<SATNUM; ++s){
-            float x = satx[sat_base + s];
-            float y = saty[sat_base + s];
-            float z = satz[sat_base + s];
-            float c = (lp*x + mp*y + npv*z) * rsqrtf(x*x + y*y + z*z);
-            vis[s] = (c >= cosphi);
-          }
-          if(!(vis[sat_m] && vis[sat_n])) continue;
-        }
-        float phase = u0*lp + v0*mp + w0*(npv - 1.0f);
-        float ang = k*phase;
-        float s,c; sincos_fast(ang,&s,&c);
-        float bp=sB[k0];
-        acc_re += bp*c;
-        acc_im += bp*s;
-      }
-    }
-    __syncthreads();
-  }
-
-  if(active) Vpart[ih] = make_float2(acc_re, acc_im);
-}
 
 // ----- grouping (device0) -----
 __global__ void iota_kernel(int* idx, int n){

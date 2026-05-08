@@ -598,7 +598,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  float s_scale = 4.0f * (float)M_PI / (float)npix;
+  float s_scale = 4.0f * (float)M_PI / (double)npix;
   for (long long i=0;i<npix;i++) hB[i] *= s_scale;
 
   std::cout << "load B/theta/phi OK, s=" << s_scale << ", time=" << t_io.toc_s() << " s\n";
