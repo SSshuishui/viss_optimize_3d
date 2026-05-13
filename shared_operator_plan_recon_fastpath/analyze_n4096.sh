@@ -6,7 +6,7 @@ nsys profile -o pipeline_multigpu \
   --cpuctxsw=none \
   --trace=cuda \
   --cuda-memory-usage=false \
-  ./shared_operator_plan_stage2_balance \
+  ./shared_operator_plan_recon_fastpath \
   --btag=10M \
   --nside=4096 \
   --day_start=1 \

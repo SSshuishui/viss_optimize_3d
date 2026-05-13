@@ -1,5 +1,5 @@
 
-# nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp shared_operator_plan_stage2_balance.cu -o shared_operator_plan_stage2_balance
+nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp shared_operator_plan_recon_fastpath.cu -o shared_operator_plan_recon_fastpath
 
 # 1. 使用 nsys 分析整体。这里保留 CUDA trace，关闭 osrt / memory 细项，避免事件过密导致导出失败。
 nsys profile -o pipeline_multigpu \
