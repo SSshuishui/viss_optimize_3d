@@ -26,6 +26,7 @@ int main(int argc,char** argv){
   std::string C_mode=get_arg(argc,argv,"--C_mode","bin");
   int gen_gpu_index=to_int(get_arg(argc,argv,"--gen_gpu_index","0"),0);
   uint64_t orbit_seed=to_u64(get_arg(argc,argv,"--orbit_seed","42"), 12345ULL);
+  std::string sky_order = get_arg(argc, argv, "--sky_order", "ring");
 
   std::string sky_dir=norm_dir(get_arg(argc,argv,"--sky_dir",""));
   std::string out_dir=get_arg(argc,argv,"--out_dir","./out_direct3d/");
@@ -151,17 +152,30 @@ int main(int argc,char** argv){
 
   HostTimer t_dcf;
   t_dcf.tic();
+
   std::vector<long long> mb;
-  if(gen_gpu_index < 0 || gen_gpu_index >= G){
-    std::cerr << "ERROR --gen_gpu_index out of range\n";
-    return 1;
-  }
-  if(!accumulate_mb_from_online_orbit(gpus[gen_gpu_index], lambda_m, bl_max, dcf_days, segs, orbit_seed, mb)){
-    return 1;
-  }
   std::vector<float> hdcf;
-  compute_dcf_from_mb(mb, hdcf);
-  std::cout << "Computed dcf in " << t_dcf.toc_s() << " s, dcf_len=" << hdcf.size() << "\n";
+
+  if(!dcf_bin.empty()){
+    DcfMbBinPayload payload;
+    if(!load_dcf_mb_bin(dcf_bin, payload)){
+      std::cerr << "ERROR loading dcf bin: " << dcf_bin << "\n";
+      return 1;
+    }
+    mb = payload.mb;
+    hdcf = payload.dcf;
+    std::cout << "Loaded dcf bin from " << dcf_bin
+              << ", dcf_len=" << hdcf.size()
+              << ", src_days=" << payload.dcf_days
+              << ", src_seed=" << payload.orbit_seed << "\n";
+  } else {
+    if(!accumulate_mb_from_online_orbit(gpus[gen_gpu_index], lambda_m, bl_max, dcf_days, segs, orbit_seed, mb)){
+      return 1;
+    }
+    compute_dcf_from_mb(mb, hdcf);
+    std::cout << "Computed dcf in " << t_dcf.toc_s()
+              << " s, dcf_len=" << hdcf.size() << "\n";
+  }
 
   std::vector<GpuCtx> ctx(G);
   std::vector<GpuDirectExtra> ext(G);
@@ -202,8 +216,15 @@ int main(int argc,char** argv){
 
     int BLOCK=256;
     int grid=(int)((n_chunk+BLOCK-1)/BLOCK);
-    pix2lmn_nest_kernel<<<grid,BLOCK,0,ctx[gi].xfer_stream>>>(
-      nside, (unsigned int)pix0, (int)n_chunk, ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    if (sky_order == "ring") {
+      pix2lmn_ring_kernel<<<grid, BLOCK, 0, ctx[gi].xfer_stream>>>(
+        nside, (unsigned int)pix0, (int)n_chunk,
+        ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    } else {
+      pix2lmn_nest_kernel<<<grid, BLOCK, 0, ctx[gi].xfer_stream>>>(
+        nside, (unsigned int)pix0, (int)n_chunk,
+        ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n);
+    }
     CHECK_CUDA(cudaPeekAtLastError());
     build_tile_cone_meta_kernel<<<ctx[gi].ntile, 256, 0, ctx[gi].xfer_stream>>>(
       ctx[gi].d_l, ctx[gi].d_m, ctx[gi].d_n, ctx[gi].n_chunk,

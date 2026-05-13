@@ -1,0 +1,17 @@
+{
+  "product": "B_30M.bin",
+  "source": "sky_sao/30M_n4096_derived_from_1M_to_10M_ring_ecliptic/B_30M.bin",
+  "dataset": "raw bin",
+  "frequency_mhz": 30.0,
+  "source_frequencies_mhz": null,
+  "nside": 16384,
+  "npix": 3221225472,
+  "order": "RING",
+  "coordinate": "ecliptic",
+  "dtype": "float32 little-endian",
+  "format": "raw binary, no header",
+  "pixel_area_policy": "not premultiplied; CUDA applies pix_area=4*pi/Npix at runtime",
+  "generation_method": "chunked nearest-parent upsampling in RING order; B_child=B_parent",
+  "usage": "controlled scalability stress-test workload only",
+  "note": "derived degree-1 log-log fit No new physical small-scale structure is introduced; total sky integral is preserved under pixel-area-weighted visibility integration."
+}

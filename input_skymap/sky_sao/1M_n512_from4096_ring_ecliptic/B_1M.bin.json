@@ -1,0 +1,12 @@
+{
+  "source_bin": "sky_sao/1M_n4096_ring_ecliptic/B_1M.bin",
+  "frequency_mhz": 1.0,
+  "source_nside": 4096,
+  "nside": 512,
+  "order": "RING",
+  "coordinate": "ecliptic",
+  "dtype": "float32 little-endian",
+  "format": "raw binary, no header",
+  "resampling": "healpy.ud_grade, power=0, intensity-preserving average",
+  "derived_from": "Shanghai Astronomical Observatory nside=4096 simulated map"
+}

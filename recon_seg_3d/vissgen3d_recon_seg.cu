@@ -609,7 +609,8 @@ int main(int argc, char** argv) {
   std::vector<float> h_bll_scan((size_t)uvw_max);
   std::string bll_suf = "day" + btag + ".txt";
 
-  for (int day = dcf_start_day; day <= dcf_end_day; ++day) {
+  for (int day = dcf_start_day; day <= dcf_end_day; ++day) 
+  {
     std::string fbll = in_dir + "/bll" + std::to_string(day) + bll_suf;
     int bll_n = 0;
     if (!load_single_skip_first(fbll, h_bll_scan.data(), uvw_max, bll_n)) {

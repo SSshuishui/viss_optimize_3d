@@ -280,7 +280,7 @@ __global__ void pix2lmn_ring_kernel(
 
   const double PI = 3.141592653589793238462643383279502884;
 
-  unsigned long long ipix = (unsigned long long)base_ipix + (unsigned long long)tid;
+  unsigned long long ipix = base_ipix + (unsigned int)tid;
   unsigned long long ipix1 = ipix + 1ull;  // HEALPix RING formula uses 1-based index
 
   unsigned long long ns = (unsigned long long)nside;
@@ -1609,8 +1609,6 @@ static void broadcast_segment_to_gpus_async(const OrbitGenCtx& gen,
     dst.tlen = src.tlen;
 
     CHECK_CUDA(cudaStreamWaitEvent(stream, src.ready, 0));
-    CHECK_CUDA(cudaEventRecord(dst.bcast_start, stream));
-
     auto copy_arr = [&](float* dst_ptr, const float* src_dev, const float* src_host, size_t count){
       size_t bytes = count * sizeof(float);
       if(ctx[gi].dev == gen.dev){
@@ -1959,7 +1957,6 @@ static inline void enqueue_recon_plan_build(GpuCtx& gctx,
   plan.last_b0 = b0;
   plan.last_chunk_n = chunk_n;
   int grid = (task_count + 255) / 256;
-  CHECK_CUDA(cudaEventRecord(plan.build_start, stream));
   build_recon_task_flags_chunk_kernel<TILE_BL><<<grid,256,0,stream>>>(
       gctx.ntile_recon,
       gctx.d_tile_cx_recon, gctx.d_tile_cy_recon, gctx.d_tile_cz_recon,
@@ -2002,15 +1999,7 @@ static inline ReconGpuLoadStats run_recon_planaware_segment(GpuCtx& gctx,
   for(int ci=0; ci<total_chunks; ++ci){
     int cur = ci & 1;
     OperatorPlanBuffer& plan = gctx.recon_plan[cur];
-    HostTimer twait;
-    twait.tic();
     CHECK_CUDA(cudaEventSynchronize(plan.ready));
-    double plan_wait_s = twait.toc_s();
-    stats.host_plan_wait_s += plan_wait_s;
-    if(plan_wait_s > stats.max_chunk_plan_wait_s){
-      stats.max_chunk_plan_wait_s = plan_wait_s;
-      stats.max_chunk_plan_wait_idx = ci;
-    }
 
     int num_vv = *plan.h_num_vv;
     int num_mixed = *plan.h_num_mixed;
@@ -2022,8 +2011,6 @@ static inline ReconGpuLoadStats run_recon_planaware_segment(GpuCtx& gctx,
     if(num_vv == 0 && num_mixed == 0) stats.zero_task_chunks += 1;
     else if(num_mixed == 0) stats.vv_only_chunks += 1;
     else stats.mixed_chunks += 1;
-    stats.gpu_plan_build_s += cuda_event_elapsed_s(plan.build_start, plan.ready);
-
     cudaStream_t cstream = gctx.compute_stream;
     CHECK_CUDA(cudaStreamWaitEvent(cstream, slot.pairw_ready, 0));
     if(num_vv > 0){

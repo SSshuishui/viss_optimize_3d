@@ -102,9 +102,9 @@ static bool load_B_auto(const std::string& sky_dir,
                         std::string* used_path = nullptr) {
   auto try_txt = [&](const std::string& p)->bool{ if (load_single_auto_np(p, out, npix)) { if(used_path) *used_path = p; return true; } return false; };
   auto try_bin = [&](const std::string& p)->bool{ if (load_single_bin_exact(p, out, npix)) { if(used_path) *used_path = p; return true; } return false; };
-  const std::string b1 = sky_dir + "/B_" + btag + ".bin";
+  const std::string b1 = sky_dir + ".bin";
   const std::string b2 = sky_dir + "/B.bin";
-  const std::string t1 = sky_dir + "/B_" + btag + ".txt";
+  const std::string t1 = sky_dir + ".txt";
   const std::string t2 = sky_dir + "/B.txt";
   if (mode == "bin") return try_bin(b1) || try_bin(b2);
   if (mode == "txt") return try_txt(t1) || try_txt(t2);

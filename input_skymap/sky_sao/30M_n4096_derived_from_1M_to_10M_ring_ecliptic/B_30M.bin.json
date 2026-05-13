@@ -1,0 +1,28 @@
+{
+  "product": "B_30M.bin",
+  "source": "1MHz:shao/1.0MHz_with_absorption.hdf5; 2MHz:shao/2.0MHz_with_absorption_split.hdf5; 3MHz:shao/3.0MHz_with_absorption_split.hdf5; 4MHz:shao/4.0MHz_with_absorption_split.hdf5; 5MHz:shao/5.0MHz_with_absorption_split.hdf5; 6MHz:shao/6.0MHz_with_absorption_split.hdf5; 7MHz:shao/7.0MHz_with_absorption_split.hdf5; 8MHz:shao/8.0MHz_with_absorption_split.hdf5; 9MHz:shao/9.0MHz_with_absorption_split.hdf5; 10MHz:shao/10.0MHz_with_absorption_split.hdf5",
+  "dataset": "skymap",
+  "frequency_mhz": 30.0,
+  "source_frequencies_mhz": [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    9.0,
+    10.0
+  ],
+  "nside": 4096,
+  "npix": 201326592,
+  "order": "RING",
+  "coordinate": "ecliptic",
+  "dtype": "float32 little-endian",
+  "format": "raw binary, no header",
+  "pixel_area_policy": "not premultiplied; CUDA applies pix_area=4*pi/Npix at runtime",
+  "generation_method": "per-pixel log-log polynomial fit of degree 1: log(B_nu)=a0+a1*log(nu)[+a2*log(nu)^2], then evaluated at target frequency",
+  "usage": "derived frequency-scaled workload; suitable for controlled experiments, not an independent SAO simulation",
+  "note": "Uses existing same-coordinate same-order SAO maps. If absorption produces strong curvature, degree=1 is an effective spectral-index extrapolation; degree=2 should be treated as sensitivity analysis."
+}

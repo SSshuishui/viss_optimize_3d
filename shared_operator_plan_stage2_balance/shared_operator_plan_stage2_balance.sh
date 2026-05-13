@@ -3,11 +3,22 @@ set -euo pipefail
 
 # build
 # nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp dcf_mb_gen.cu -o dcf_mb_gen
-# nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp main_3d_vissfast.cu -o main_3d_vissfast
+# nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp shared_operator_plan_stage2_balance.cu -o shared_operator_plan_stage2_balance
 
 # ------------------------------------------------------------
 # step 1: generate stable dcf+mb once and save to bin
 # ------------------------------------------------------------
+# ./dcf_mb_gen \
+#   --btag=1M \
+#   --dcf_days=450 \
+#   --segs=1 \
+#   --bl_max=100000 \
+#   --gpus=1 \
+#   --gen_gpu_index=0 \
+#   --orbit_seed=42 \
+#   --out=dcf_mb_1M_days450_seed42.bin
+
+
 # ./dcf_mb_gen \
 #   --btag=10M \
 #   --dcf_days=450 \

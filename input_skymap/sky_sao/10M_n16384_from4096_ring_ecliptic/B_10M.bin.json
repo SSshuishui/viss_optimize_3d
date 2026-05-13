@@ -1,0 +1,13 @@
+{
+  "source_bin": "sky_sao/10M_n4096_ring_ecliptic/B_10M.bin",
+  "frequency_mhz": 10.0,
+  "source_nside": 4096,
+  "nside": 16384,
+  "order": "RING",
+  "coordinate": "ecliptic",
+  "dtype": "float32 little-endian",
+  "format": "raw binary, no header",
+  "resampling": "chunked nearest-parent upsampling; no new physical small-scale structure",
+  "usage": "controlled scalability stress-test workload only",
+  "derived_from": "Shanghai Astronomical Observatory nside=4096 simulated map"
+}
