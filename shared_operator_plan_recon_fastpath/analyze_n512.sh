@@ -5,7 +5,7 @@ nvcc -O3 --use_fast_math -lineinfo -std=c++17 -Xcompiler -fopenmp shared_operato
 nsys profile -o pipeline_multigpu \
   --trace=cuda,nvtx,osrt \
   --cuda-memory-usage=true \
-  ./shared_operator_plan_stage2_balance \
+  ./shared_operator_plan_recon_fastpath \
   --btag=1M \
   --nside=512 \
   --day_start=1 \
