@@ -9,7 +9,6 @@ nsys profile -o pipeline_multigpu \
   --day_start=1 \
   --day_count=3 \
   --segs=10 \
-  --blockage=1 \
   --sky_dir=../input_skymap/sky_sao/10M_n4096_ring_ecliptic/B_10M \
   --out_dir=./out10M/ \
   --gpus=1,3 \
@@ -18,7 +17,8 @@ nsys profile -o pipeline_multigpu \
   --C_mode=bin \
   --sky_order=ring \
   --orbit_seed=42 \
-  --dcf_bin=dcf_mb_10M_days450_seed42.bin
+  --dcf_bin=dcf_mb_10M_days450_seed42.bin \
+  --viss_tile_pix=256
 
 
 

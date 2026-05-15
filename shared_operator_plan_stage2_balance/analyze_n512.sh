@@ -21,6 +21,12 @@ nsys profile -o pipeline_multigpu \
   --viss_tile_pix=256
 
 
+# 在服务器上运行
+# nsys stats pipeline_multigpu.nsys-rep \
+#  --report cuda_gpu_kern_sum \
+#  --format csv \
+#  -o kernel_stats.csv
+
 
 # 2. 用 NCU 分析热点 kernel（单GPU）
 # # 只分析 viss kernel
