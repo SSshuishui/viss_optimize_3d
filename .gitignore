@@ -39,3 +39,10 @@
 earth_1Mhz/*.txt
 earth_10Mhz/*.txt
 
+shared_operator_plan_load_balance/save/
+
+*.pdf
+*.png
+*.json
+*.csv
+**/recon_ncu/**

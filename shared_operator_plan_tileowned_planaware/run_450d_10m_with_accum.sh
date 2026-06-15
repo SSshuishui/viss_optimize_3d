@@ -65,7 +65,7 @@ python3 ./run_planaware_450d_accumulate.py \
     --segs=10 \
     --sky_dir=../input_skymap/sky_sao/30M_n4096_derived_from_1M_to_10M_ring_ecliptic/B_30M \
     --out_dir="${OUT_DIR}/" \
-    --gpus=1,3 \
+    --gpus=2,3 \
     --gen_gpu_index=0 \
     --B_mode=bin \
     --C_mode=bin \
@@ -75,12 +75,12 @@ python3 ./run_planaware_450d_accumulate.py \
     --viss_tile_pix=256
 
 
-# OUT_DIR=./out1M
+# OUT_DIR=./out1M_n512
 # mkdir -p "${OUT_DIR}"
 
 # python3 ./run_planaware_450d_accumulate.py \
 #   --out-dir "${OUT_DIR}" \
-#   --btag 10M \
+#   --btag 1M \
 #   --nside 512 \
 #   --day-start 1 \
 #   --day-count 450 \
@@ -99,7 +99,7 @@ python3 ./run_planaware_450d_accumulate.py \
 #     --segs=10 \
 #     --sky_dir=../input_skymap/sky_sao/1M_n512_from4096_ring_ecliptic/B_1M \
 #     --out_dir="${OUT_DIR}/" \
-#     --gpus=0,1 \
+#     --gpus=2,3 \
 #     --gen_gpu_index=0 \
 #     --B_mode=bin \
 #     --C_mode=bin \
